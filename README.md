@@ -620,7 +620,7 @@ These hold at all times, in all states, on all devices. Violation is a bug.
 
 ## The Paper Series
 
-This implementation is the Zig realization of a 20-paper specification:
+This implementation is the Zig 0.16.0 realization of a 20-paper specification:
 
 | Paper | Topic | What It Contributes |
 |-------|-------|-------------------|

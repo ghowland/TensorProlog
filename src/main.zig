@@ -2,6 +2,8 @@
 // src/main.zig
 // ============================================================
 
+const std = @import("std");
+
 const cli_mod = @import("config/cli.zig");
 const config_file_mod = @import("config/config_file.zig");
 const integration_mod = @import("config/integration_test.zig");

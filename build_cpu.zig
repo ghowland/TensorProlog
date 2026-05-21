@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const ptx_target = b.resolveTargetQuery(.{
         .cpu_arch = .nvptx64,
         .os_tag = .freestanding,
-        .cpu_model = .{ .explicit = &std.Target.nvptx.cpu.sm_61 },
+        .cpu_model = .{ .explicit = &std.Target.nvptx.cpu.sm_75 },
     });
 
     const gpu_shared_kernel = b.createModule(.{

@@ -14,13 +14,13 @@ pub fn build(b: *std.Build) void {
     const gpu_shared_kernel = b.createModule(.{
         .root_source_file = b.path("src/vlp_gpu_shared.zig"),
         .target = ptx_target,
-        .optimize = .Debug,
+        .optimize = .ReleaseSafe,
     });
 
     const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/vlp_kernel.zig"),
         .target = ptx_target,
-        .optimize = .Debug,
+        .optimize = .ReleaseSafe,
     });
     kernel_module.addImport("vlp_gpu_shared", gpu_shared_kernel);
 

@@ -1,8 +1,8 @@
-# TensorProlog
+# VDRProlog
 
 **Exact integer arithmetic GPU compute stack for LLM inference, training, and autonomous operation.**
 
-TensorProlog replaces floating-point GPU computing with VDR (Value/Denominator/Remainder) integer triples. Every computation is exact. Every result is deterministic. Every intermediate value is inspectable. Softmax outputs sum to D=65536 by integer equality, not approximation. Checkpoints are bit-identical across platforms. Training on one machine produces the same model as training on another. Always.
+VDRProlog replaces floating-point GPU computing with VDR (Value/Denominator/Remainder) integer triples. Every computation is exact. Every result is deterministic. Every intermediate value is inspectable. Softmax outputs sum to D=65536 by integer equality, not approximation. Checkpoints are bit-identical across platforms. Training on one machine produces the same model as training on another. Always.
 
 The system combines an LLM inference engine with a Prolog logic engine, a knowledge base store, a grammar template engine, and autonomous runner management — all operating on exact integer arithmetic. The LLM handles judgment and framing. Everything else (data retrieval, computation, deduction, formatting, access control) is handled by deterministic integer subsystems at zero LLM token cost.
 
@@ -647,7 +647,7 @@ This implementation is the Zig 0.16.0 realization of a 20-paper specification:
 
 ---
 
-## TensorProlog API Surface
+## VDRProlog API Surface
 
 The system exposes ~580 functions across 23 modules:
 
@@ -748,6 +748,6 @@ MIT
 ## Related Work
 
 - [VDR and VDR-LLM-Prolog series](https://sireus.cloud/vdr-llm-prolog/) — The 34-paper specification this implements on the GPU
-- [TensorProlog tech spec](docs/tech_spec.md) — Technical specification
-- [TensorProlog cookbook](docs/cookbook.md) — ML practitioner workflow reference
+- [VDRProlog tech spec](docs/tech_spec.md) — Technical specification
+- [VDRProlog cookbook](docs/cookbook.md) — ML practitioner workflow reference
 

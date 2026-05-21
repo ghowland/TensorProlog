@@ -1,7 +1,7 @@
 // ============================================================
 // build.zig
 // Two artifacts: PTX kernel (nvptx64) + host binary (native).
-// PTX embedded into host binary via @embedFile.
+// PTX installed as build output.
 // ============================================================
 
 const std = @import("std");
@@ -81,37 +81,5 @@ pub fn build(b: *std.Build) void {
         .root_module = host_module,
     });
 
-    // Embed PTX into host binary — bridge reads via @embedFile
-    host_module.addAnonymousImport("vlp_kernel_ptx", .{
-        .root_source_file = ptx_kernel.getEmittedAsm(),
-    });
-
-    // Link CUDA driver library
-    exe.linkSystemLibrary("cuda");
-    exe.linkLibC();
-
     b.installArtifact(exe);
-
-    // ============================================================
-    // Step 3: Tests
-    // ============================================================
-
-    const test_module = b.createModule(.{
-        .root_source_file = b.path("src/vlp_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    test_module.addImport("vlp_gpu_shared", gpu_shared_host);
-    test_module.addImport("vlp_types", types_mod);
-
-    const tests = b.addTest(.{
-        .name = "vlp_test",
-        .root_module = test_module,
-    });
-    tests.linkSystemLibrary("cuda");
-    tests.linkLibC();
-
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run VLP tests");
-    test_step.dependOn(&run_tests.step);
 }

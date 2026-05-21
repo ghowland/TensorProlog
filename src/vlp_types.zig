@@ -67,7 +67,7 @@ pub const Q16 = extern struct {
     r0: i16 = 0,
     r1: i16 = 0,
 
-    // pub const D: i32 = 65536;
+    pub const D: i32 = D16;
 
     pub fn zero() Q16 {
         return .{ .v = 0 };
@@ -980,7 +980,8 @@ pub const LevelStats = struct {
         const total_ops = self.totalCount();
         if (total_ops == 0) return Q16.zero();
         return Q16.fromParts(
-            @intCast(@divTrunc(total_tokens * Q16.D, total_ops)),
+            @intCast(@divTrunc(total_tokens * D16, total_ops)),
+            0,
             0,
         );
     }

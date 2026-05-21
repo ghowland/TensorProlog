@@ -402,7 +402,7 @@ fn dispatchGpu(self: *BuiltinExecutor, mapping: PipelineMapping, args: *const Bu
     // Write result as fact
     const result_fact = types.Fact{
         .tag = .value,
-        .value = types.Q16.fromParts(result_values[0], 0),
+        .value = types.Q16.fromParts(result_values[0], 0, 0),
         .provenance = types.Provenance.direct(.vdr_computation, args.output_kb_id, args.output_slot_id, kb_mod.currentTimestamp()),
     };
     _ = self.kb_store.factWrite(args.output_kb_id, args.output_slot_id, &result_fact);
@@ -461,7 +461,7 @@ fn hostUnary(op: i32, a: types.Q16) types.Q16 {
     return switch (op) {
         0 => types.Q16.fromParts(if (a.v < 0) -a.v else a.v, a.r0), // abs
         1 => types.Q16.fromParts(-a.v, -a.r0), // negate
-        2 => types.Q16.fromParts(if (a.v > 0) types.Q16.D else if (a.v < 0) -types.Q16.D else 0, 0), // sign
+        2 => types.Q16.fromParts(if (a.v > 0) types.Q16.D else if (a.v < 0) -types.Q16.D else 0, 0, 0), // sign
         10 => types.Q16.mul(a, a), // square
         11 => types.Q16.fromParts(a.v * 2, a.r0 * 2), // double
         12 => types.Q16.fromParts(@divTrunc(a.v, 2), a.r0), // halve

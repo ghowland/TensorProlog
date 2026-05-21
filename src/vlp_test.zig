@@ -93,7 +93,7 @@ pub fn testSnapshotRoundtrip(
     // 3. Modify state
     const test_fact = types.Fact{
         .tag = .value,
-        .value = types.Q16.fromParts(99999, 0),
+        .value = types.Q16.fromParts(99999, 0, 0),
         .provenance = types.Provenance.direct(.vdr_computation, 0, 0, 0),
     };
     _ = kb_store.factWrite(0, 0, &test_fact);
@@ -127,7 +127,7 @@ pub fn testCloneIndependence(
     // 1. Write known fact to parent
     const parent_fact = types.Fact{
         .tag = .value,
-        .value = types.Q16.fromParts(1000, 0),
+        .value = types.Q16.fromParts(1000, 0, 0),
         .provenance = types.Provenance.direct(.vdr_computation, 0, 0, 0),
     };
     _ = kb_store.factWrite(0, 50, &parent_fact);
@@ -140,7 +140,7 @@ pub fn testCloneIndependence(
     // 3. Write different fact to clone's view
     const clone_fact = types.Fact{
         .tag = .value,
-        .value = types.Q16.fromParts(2000, 0),
+        .value = types.Q16.fromParts(2000, 0, 0),
         .provenance = types.Provenance.direct(.vdr_computation, 0, 0, 0),
     };
     _ = kb_store.factWrite(0, 50, &clone_fact);
@@ -191,7 +191,7 @@ pub fn testAccessIsolation(
     // 2. Session A asserts a fact
     const secret = types.Fact{
         .tag = .value,
-        .value = types.Q16.fromParts(42, 0),
+        .value = types.Q16.fromParts(42, 0, 0),
         .provenance = types.Provenance.direct(.user_stated, private_kb, 0, 0),
     };
     _ = kb_store.factWrite(private_kb, 0, &secret);
@@ -249,8 +249,8 @@ pub fn testConfidencePropagation(kb_store: *kb_mod.KbStore, bridge: *bridge_mod.
     if (chained.v <= 0) failures += 1;
 
     // Test 4: VDR arithmetic basics
-    const a = types.Q16.fromParts(32768, 0); // 0.5
-    const b = types.Q16.fromParts(32768, 0); // 0.5
+    const a = types.Q16.fromParts(32768, 0, 0); // 0.5
+    const b = types.Q16.fromParts(32768, 0, 0); // 0.5
     const sum = types.Q16.add(a, b);
     if (sum.v != 65536) failures += 1; // 0.5 + 0.5 = 1.0
 
@@ -258,8 +258,8 @@ pub fn testConfidencePropagation(kb_store: *kb_mod.KbStore, bridge: *bridge_mod.
     if (prod.v != 16384) failures += 1; // 0.5 * 0.5 = 0.25 → 16384
 
     // Test 5: Cross-multiply comparison
-    const x = types.Q16.fromParts(100, 0);
-    const y = types.Q16.fromParts(100, 0);
+    const x = types.Q16.fromParts(100, 0, 0);
+    const y = types.Q16.fromParts(100, 0, 0);
     if (!x.eql(y)) failures += 1;
     if (types.Q16.crossMultiplyCompare(x, y) != 0) failures += 1;
 

@@ -1,12 +1,10 @@
 // ============================================================
 // vlp_gpu_shared.zig
-// SPIR-V-safe shared definitions.
+// GPU-safe shared definitions.
 // No functions. No std. No imports. Pure declarations.
-// Compiles for both spirv32-vulkan and native x86_64.
+// Compiles for both nvptx64-freestanding and native x86_64.
 // This file is the single source of truth for host-device contract.
 // ============================================================
-
-const shared = @import("vlp_gpu_shared");
 
 // ============================================================
 // System constants
@@ -20,6 +18,7 @@ pub const RULE_INTS: i32 = 12; // 48 bytes / 4
 pub const TERM_INTS: i32 = 6; // 24 bytes / 4
 pub const BINDING_INTS: i32 = 2; // 8 bytes / 4
 pub const D: i32 = 65536; // Q16 denominator
+pub const D16: i32 = 65536; // alias for host-side use
 pub const D32: i64 = 4294967296; // 2^32
 pub const MAX_WORKGROUP: i32 = 256;
 pub const MAX_BODY_CONDITIONS: i32 = 16;
@@ -29,16 +28,16 @@ pub const MAX_CHAIN_LINKS: i32 = 100;
 pub const MAX_BINDINGS_PER: i32 = 8;
 
 // ============================================================
-// Buffer size declarations — upper bounds for extern struct arrays.
-// Actual buffer sizes determined by Vulkan descriptor binding.
-// These are compile-time constants the SPIR-V module uses for typing.
+// Buffer size declarations — upper bounds for typing.
+// Actual buffer sizes determined by CUDA cuMemAlloc.
+// These are compile-time constants used for host-side arrays.
 // ============================================================
 
 pub const MAX_BUFFER_INTS: i32 = 16 * 1024 * 1024; // 64 MB per buffer
 pub const MAX_KV_CACHE_INTS: i32 = 64 * 1024 * 1024; // 256 MB
 pub const MAX_STATUS_ENTRIES: i32 = 65536;
 pub const MAX_RESULT_SLOTS: i32 = 16;
-pub const PARAMS_INTS: i32 = 64; // 256 bytes uniform
+pub const PARAMS_INTS: i32 = 64; // 256 bytes
 
 // ============================================================
 // Op codes — kernel entry point switch
@@ -149,34 +148,6 @@ pub const confidence_table = [11]i32{
 };
 
 // ============================================================
-// Descriptor set and binding indices
-// ============================================================
-
-pub const SET_MODEL: u32 = 0;
-pub const SET_KB_DATA: u32 = 1;
-pub const SET_SCRATCH: u32 = 2;
-pub const SET_CONTROL: u32 = 3;
-
-pub const BIND_EMBEDDING: u32 = 0;
-pub const BIND_LAYER_WEIGHTS: u32 = 1;
-pub const BIND_LM_HEAD: u32 = 2;
-pub const BIND_LN_PARAMS: u32 = 3;
-
-pub const BIND_KB_STORE: u32 = 0;
-pub const BIND_FACT_STORE: u32 = 1;
-pub const BIND_RULE_STORE: u32 = 2;
-pub const BIND_TERM_STORE: u32 = 3;
-pub const BIND_LIVE_STATE: u32 = 4;
-
-pub const BIND_SCRATCH_A: u32 = 0;
-pub const BIND_SCRATCH_B: u32 = 1;
-pub const BIND_KV_CACHE: u32 = 2;
-
-pub const BIND_PARAMS: u32 = 0;
-pub const BIND_STATUS: u32 = 1;
-pub const BIND_RESULT_COUNTS: u32 = 2;
-
-// ============================================================
 // Fact field offsets within FACT_INTS (10 ints = 40 bytes)
 // ============================================================
 
@@ -221,7 +192,7 @@ pub const RULE_CREATOR: i32 = 11;
 
 // ============================================================
 // Params field offsets — common header then per-op fields
-// All offsets in i32 units into the params uniform buffer.
+// All offsets in i32 units into the params buffer.
 // ============================================================
 
 pub const P_OP_CODE: i32 = 0;

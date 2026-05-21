@@ -224,7 +224,7 @@ fn populateOso(kb_store: *kb_mod.KbStore) types.Status {
         const name_off = kb_store.textAppend(name);
         const fact = types.Fact{
             .tag = .text,
-            .value = types.Q16.fromParts(name_off, @intCast(name.len)),
+            .value = types.Q16.fromParts(name_off, @intCast(name.len), 0),
             .provenance = types.Provenance.direct(.vdr_computation, OSO_KB_ID, @intCast(i), 0),
         };
         const status = kb_store.factWrite(OSO_KB_ID, @intCast(i), &fact);
@@ -269,7 +269,7 @@ fn populateCommandVocab(kb_store: *kb_mod.KbStore) types.Status {
         const name_off = kb_store.textAppend(name);
         const fact = types.Fact{
             .tag = .text,
-            .value = types.Q16.fromParts(name_off, @intCast(name.len)),
+            .value = types.Q16.fromParts(name_off, @intCast(name.len), 0),
             .provenance = types.Provenance.direct(.vdr_computation, COMMAND_VOCAB_KB_ID, @intCast(i), 0),
         };
         const status = kb_store.factWrite(COMMAND_VOCAB_KB_ID, @intCast(i), &fact);
@@ -302,7 +302,7 @@ fn populateHygieneRules(kb_store: *kb_mod.KbStore) types.Status {
         const desc_off = kb_store.textAppend(desc);
         const fact = types.Fact{
             .tag = .rule_ref,
-            .value = types.Q16.fromParts(desc_off, @intCast(desc.len)),
+            .value = types.Q16.fromParts(desc_off, @intCast(desc.len), 0),
             .provenance = types.Provenance.direct(.vdr_computation, HYGIENE_KB_ID, @intCast(i), 0),
         };
         const status = kb_store.factWrite(HYGIENE_KB_ID, @intCast(i), &fact);

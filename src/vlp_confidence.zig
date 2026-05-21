@@ -10,6 +10,8 @@ const bridge_mod = @import("vlp_bridge.zig");
 const gpu = @import("vlp_gpu_params.zig");
 const kb_mod = @import("vlp_kb_store.zig");
 
+const shared = @import("vlp_gpu_shared");
+
 // ============================================================
 // Assignment — set confidence from source type
 // ============================================================
@@ -49,43 +51,53 @@ pub fn combineAgreeing(bridge: *bridge_mod.Bridge, confidences: []const types.Q1
     }
 
     const result_v: i32 = @intCast(d - product);
-    return types.Q16.fromParts(result_v, 0);
+    return types.Q16.fromParts(result_v, 0, 0);
 }
 
 fn combineAgreeingGpu(bridge: *bridge_mod.Bridge, confidences: []const types.Q16) types.Q16 {
     const n: i32 = @intCast(confidences.len);
 
     // Upload confidences to scratch_a (just the .v fields)
-    var values = bridge.allocator.alloc(i32, @intCast(n)) catch return types.Q16.zero();
-    defer bridge.allocator.free(values);
+    // Use stack buffer for small-to-medium N, heap would need allocator passed in
+    var stack_buf: [4096]i32 = undefined;
+    if (n > 4096) return combineAgreeingHost(confidences); // fallback
+
     for (confidences, 0..) |c, i| {
-        values[i] = c.v;
+        stack_buf[i] = c.v;
     }
-    const bytes: []const u8 = @as([*]const u8, @ptrCast(values.ptr))[0 .. values.len * 4];
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(&stack_buf))[0 .. @as(usize, @intCast(n)) * 4];
     _ = bridge.uploadToBuffer(.scratch_a, 0, bytes);
 
-    var params = gpu.BuiltinConfidenceCombineParams{
-        .n_sources = n,
-        .mode = 0, // agreeing
-        .penalty_v = 0,
-        .input_offset = 0,
-    };
+    // Build params buffer
+    var params_buf: bridge_mod.ParamsBuffer = .{0} ** shared.PARAMS_INTS;
+    params_buf[@intCast(shared.P_OP_CODE)] = @intFromEnum(shared.OpCode.confidence_combine);
+    params_buf[@intCast(shared.P_FIELD_0)] = n;
+    params_buf[@intCast(shared.P_FIELD_1)] = 0; // mode: agreeing
+    params_buf[@intCast(shared.P_FIELD_2)] = 0; // penalty: unused
+    params_buf[@intCast(shared.P_FIELD_3)] = 0; // input_offset
 
-    _ = bridge.dispatch(&.{
-        .pipeline = .builtin_confidence_combine,
+    const status = bridge.dispatch(&.{
+        .params = params_buf,
         .group_count_x = 1,
-        .group_count_y = 1,
-        .group_count_z = 1,
-        .params_ptr = @ptrCast(&params),
-        .params_size = @sizeOf(gpu.BuiltinConfidenceCombineParams),
     });
+    if (status.isErr()) return combineAgreeingHost(confidences);
 
     // Read result from scratch_b[0]
     var result: i32 = 0;
     const dest: []u8 = @as([*]u8, @ptrCast(&result))[0..4];
     _ = bridge.downloadFromBuffer(.scratch_b, 0, dest);
 
-    return types.Q16.fromParts(result, 0);
+    return types.Q16.fromParts(result, 0, 0);
+}
+
+fn combineAgreeingHost(confidences: []const types.Q16) types.Q16 {
+    const d: i64 = types.Q16.D;
+    var product: i64 = d;
+    for (confidences) |c| {
+        const complement: i64 = d - @as(i64, c.v);
+        product = @divTrunc(product * complement, d);
+    }
+    return types.Q16.fromParts(@intCast(d - product), 0, 0);
 }
 
 // ============================================================
@@ -100,32 +112,40 @@ pub fn combineConflicting(bridge: *bridge_mod.Bridge, confidences: []const types
     const n: i32 = @intCast(confidences.len);
 
     if (n > 64 and bridge.shouldUseGpu(.builtin_array, n)) {
-        // Upload and dispatch with mode=1
-        var values = bridge.allocator.alloc(i32, @intCast(n)) catch return types.Q16.zero();
-        defer bridge.allocator.free(values);
-        for (confidences, 0..) |c, i| values[i] = c.v;
-        const bytes: []const u8 = @as([*]const u8, @ptrCast(values.ptr))[0 .. values.len * 4];
+        var stack_buf: [4096]i32 = undefined;
+        if (n > 4096) {
+            // Fallback to host
+            var base = combineAgreeingHost(confidences);
+            const pairs: i64 = @as(i64, n) * (@as(i64, n) - 1) / 2;
+            var pi: i64 = 0;
+            while (pi < pairs) : (pi += 1) {
+                base = types.Q16.mul(base, penalty);
+            }
+            return base;
+        }
+
+        for (confidences, 0..) |c, i| stack_buf[i] = c.v;
+        const bytes: []const u8 = @as([*]const u8, @ptrCast(&stack_buf))[0 .. @as(usize, @intCast(n)) * 4];
         _ = bridge.uploadToBuffer(.scratch_a, 0, bytes);
 
-        var params = gpu.BuiltinConfidenceCombineParams{
-            .n_sources = n,
-            .mode = 1,
-            .penalty_v = penalty.v,
-            .input_offset = 0,
-        };
-        _ = bridge.dispatch(&.{
-            .pipeline = .builtin_confidence_combine,
+        var params_buf: bridge_mod.ParamsBuffer = .{0} ** shared.PARAMS_INTS;
+        params_buf[@intCast(shared.P_OP_CODE)] = @intFromEnum(shared.OpCode.confidence_combine);
+        params_buf[@intCast(shared.P_FIELD_0)] = n;
+        params_buf[@intCast(shared.P_FIELD_1)] = 1; // mode: conflicting
+        params_buf[@intCast(shared.P_FIELD_2)] = penalty.v;
+        params_buf[@intCast(shared.P_FIELD_3)] = 0;
+
+        const status = bridge.dispatch(&.{
+            .params = params_buf,
             .group_count_x = 1,
-            .group_count_y = 1,
-            .group_count_z = 1,
-            .params_ptr = @ptrCast(&params),
-            .params_size = @sizeOf(gpu.BuiltinConfidenceCombineParams),
         });
 
-        var result: i32 = 0;
-        const dest: []u8 = @as([*]u8, @ptrCast(&result))[0..4];
-        _ = bridge.downloadFromBuffer(.scratch_b, 0, dest);
-        return types.Q16.fromParts(result, 0);
+        if (status.isOk()) {
+            var result: i32 = 0;
+            const dest: []u8 = @as([*]u8, @ptrCast(&result))[0..4];
+            _ = bridge.downloadFromBuffer(.scratch_b, 0, dest);
+            return types.Q16.fromParts(result, 0, 0);
+        }
     }
 
     // Host path: agreeing combination then apply penalty per pair
@@ -180,9 +200,7 @@ fn propagateWithDepth(kb_store: *kb_mod.KbStore, kb_id: i32, slot_id: i32, depth
         return types.Q16.zero();
     }
 
-    // Derived — read the rule, find source facts, chain their confidences
-    // The rule's body conditions tell us which facts were used
-    // For now, simplified: return the fact's stored confidence
+    // Derived — return the fact's stored confidence
     // Full implementation would trace through rule.body_offset terms
     return fact.provenance.confidence;
 }

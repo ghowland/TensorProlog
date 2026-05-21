@@ -6,7 +6,7 @@ VDRProlog replaces floating-point GPU computing with VDR (Value/Denominator/Rema
 
 The system combines an LLM inference engine with a Prolog logic engine, a knowledge base store, a grammar template engine, and autonomous runner management — all operating on exact integer arithmetic. The LLM handles judgment and framing. Everything else (data retrieval, computation, deduction, formatting, access control) is handled by deterministic integer subsystems at zero LLM token cost.
 
-**Development Paused until SPIR-V Matures**
+## Development Paused until SPIR-V Matures
 
 VLP is a GPU-accelerated system designed to run an LLM inference engine,
 Prolog deduction, knowledge base management, and grammar rendering using

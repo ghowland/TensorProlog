@@ -39,7 +39,7 @@ pub fn main() void {
     const FnCtxCreate = *const fn (*CUcontext, c_uint, CUdevice) callconv(.c) CUresult;
     const FnCtxDestroy = *const fn (CUcontext) callconv(.c) CUresult;
     const FnCtxSync = *const fn () callconv(.c) CUresult;
-    const FnModuleLoadData = *const fn (*CUmodule, [*]const u8) callconv(.c) CUresult;
+    // const FnModuleLoadData = *const fn (*CUmodule, [*]const u8) callconv(.c) CUresult;
     const FnModuleUnload = *const fn (CUmodule) callconv(.c) CUresult;
     const FnModuleGetFunc = *const fn (*CUfunction, CUmodule, [*:0]const u8) callconv(.c) CUresult;
     const FnMemAlloc = *const fn (*CUdeviceptr, usize) callconv(.c) CUresult;
@@ -77,10 +77,16 @@ pub fn main() void {
         std.debug.print("FAIL\n", .{});
         return;
     };
-    const cuModuleLoadData = cuda(FnModuleLoadData, nv, "cuModuleLoadData") orelse {
-        std.debug.print("FAIL\n", .{});
+    // const cuModuleLoadData = cuda(FnModuleLoadData, nv, "cuModuleLoadData") orelse {
+    //     std.debug.print("FAIL\n", .{});
+    //     return;
+    // };
+    const FnModuleLoadDataEx = *const fn (*CUmodule, [*]const u8, c_uint, [*]c_int, [*]?*anyopaque) callconv(.c) CUresult;
+    const cuModuleLoadDataEx = cuda(FnModuleLoadDataEx, nv, "cuModuleLoadDataEx") orelse {
+        std.debug.print("FAIL: no cuModuleLoadDataEx\n", .{});
         return;
     };
+
     const cuModuleUnload = cuda(FnModuleUnload, nv, "cuModuleUnload") orelse {
         std.debug.print("FAIL\n", .{});
         return;
@@ -147,10 +153,27 @@ pub fn main() void {
     std.debug.print("[DBG] PTX first 80 bytes: {s}\n", .{ptx_source[0..@min(80, ptx_source.len)]});
     std.debug.print("[DBG] PTX size: {} last byte: {}\n", .{ ptx_source.len, ptx_source[ptx_source.len - 1] });
 
+    // var mod: CUmodule = null;
+    // const lr = cuModuleLoadData(&mod, ptx_source.ptr);
+    // if (lr != CUDA_SUCCESS) {
+    //     std.debug.print("FAIL: cuModuleLoadData {}\n", .{lr});
+    //     _ = cuCtxDestroy(ctx);
+    //     return;
+    // }
+    // std.debug.print("[OK] PTX loaded ({} bytes)\n", .{ptx_source.len});
+
     var mod: CUmodule = null;
-    const lr = cuModuleLoadData(&mod, ptx_source.ptr);
+    var error_log: [4096]u8 = [_]u8{0} ** 4096;
+    const error_log_ptr: ?*anyopaque = @ptrCast(&error_log);
+    var error_log_size_val: usize = 4096;
+    const error_log_size_ptr: ?*anyopaque = @ptrCast(&error_log_size_val);
+    var jit_options = [_]c_int{ 5, 6 };
+    var jit_values = [_]?*anyopaque{ error_log_ptr, error_log_size_ptr };
+    const lr = cuModuleLoadDataEx(&mod, ptx_source.ptr, 2, &jit_options, &jit_values);
     if (lr != CUDA_SUCCESS) {
-        std.debug.print("FAIL: cuModuleLoadData {}\n", .{lr});
+        const log_len = std.mem.indexOfScalar(u8, &error_log, 0) orelse 4096;
+        std.debug.print("FAIL: cuModuleLoadDataEx {}\n", .{lr});
+        std.debug.print("JIT: {s}\n", .{error_log[0..log_len]});
         _ = cuCtxDestroy(ctx);
         return;
     }

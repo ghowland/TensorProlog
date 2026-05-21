@@ -44,9 +44,9 @@ var result_counts: [*]i32 = undefined;
 // Shared memory for reductions and softmax
 // ============================================================
 
-var s_i32: [shared.MAX_WORKGROUP]i32 addrspace(.shared) = undefined;
-var s_i64: [shared.MAX_WORKGROUP]i64 addrspace(.shared) = undefined;
-var s_idx: [shared.MAX_WORKGROUP]i32 addrspace(.shared) = undefined;
+var s_i32: [shared.MAX_WORKGROUP]i32 = undefined;
+var s_i64: [shared.MAX_WORKGROUP]i64 = undefined;
+var s_idx: [shared.MAX_WORKGROUP]i32 = undefined;
 
 // ============================================================
 // PTX thread/block ID helpers via inline asm

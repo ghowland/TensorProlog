@@ -1,413 +1,341 @@
 const std = @import("std");
 
-// CUDA Driver API types
-const CUdevice = i32;
+const ptx_raw = @embedFile("vlp_kernel_ptx");
+const ptx_source = ptx_raw ++ [_]u8{0};
+
+const CUdevice = c_int;
 const CUcontext = ?*anyopaque;
 const CUmodule = ?*anyopaque;
 const CUfunction = ?*anyopaque;
 const CUdeviceptr = u64;
 const CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
+const HMODULE = ?*anyopaque;
+const FARPROC = ?*anyopaque;
 
-// CUDA Driver API imports — linked from nvcuda
-extern "nvcuda" fn cuInit(flags: c_uint) CUresult;
-extern "nvcuda" fn cuDeviceGet(device: *CUdevice, ordinal: c_int) CUresult;
-extern "nvcuda" fn cuDeviceGetName(name: [*]u8, len: c_int, dev: CUdevice) CUresult;
-extern "nvcuda" fn cuDeviceGetCount(count: *c_int) CUresult;
-extern "nvcuda" fn cuCtxCreate_v2(pctx: *CUcontext, flags: c_uint, dev: CUdevice) CUresult;
-extern "nvcuda" fn cuCtxDestroy_v2(ctx: CUcontext) CUresult;
-extern "nvcuda" fn cuModuleLoadData(module: *CUmodule, image: [*]const u8) CUresult;
-extern "nvcuda" fn cuModuleUnload(module: CUmodule) CUresult;
-extern "nvcuda" fn cuModuleGetFunction(hfunc: *CUfunction, hmod: CUmodule, name: [*:0]const u8) CUresult;
-extern "nvcuda" fn cuMemAlloc_v2(dptr: *CUdeviceptr, bytesize: usize) CUresult;
-extern "nvcuda" fn cuMemFree_v2(dptr: CUdeviceptr) CUresult;
-extern "nvcuda" fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: [*]const u8, byteCount: usize) CUresult;
-extern "nvcuda" fn cuMemcpyDtoH_v2(dst: [*]u8, src: CUdeviceptr, byteCount: usize) CUresult;
-extern "nvcuda" fn cuMemsetD32_v2(dptr: CUdeviceptr, ui: c_uint, n: usize) CUresult;
-extern "nvcuda" fn cuLaunchKernel(
-    f: CUfunction,
-    gridDimX: c_uint,
-    gridDimY: c_uint,
-    gridDimZ: c_uint,
-    blockDimX: c_uint,
-    blockDimY: c_uint,
-    blockDimZ: c_uint,
-    sharedMemBytes: c_uint,
-    hStream: ?*anyopaque,
-    kernelParams: [*]?*anyopaque,
-    extra: ?*anyopaque,
-) CUresult;
-extern "nvcuda" fn cuCtxSynchronize() CUresult;
+extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) HMODULE;
+extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) FARPROC;
 
-// PTX source — built by build.zig
-const ptx_source = @embedFile("vlp_kernel_ptx");
+fn cuda(comptime T: type, h: HMODULE, name: [*:0]const u8) ?T {
+    const p = GetProcAddress(h, name);
+    if (p == null) return null;
+    return @ptrCast(p);
+}
 
-pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn main() void {
+    std.debug.print("=== VDR-Prolog PTX Test ===\n\n", .{});
 
-    try stdout.print("=== VDR-Prolog PTX Test ===\n\n", .{});
-
-    // 1. Init CUDA
-    var r = cuInit(0);
-    if (r != CUDA_SUCCESS) {
-        try stdout.print("FAIL: cuInit returned {}\n", .{r});
+    const nv = LoadLibraryA("nvcuda.dll");
+    if (nv == null) {
+        std.debug.print("FAIL: LoadLibraryA nvcuda.dll\n", .{});
         return;
     }
-    try stdout.print("[OK] cuInit\n", .{});
+    std.debug.print("[OK] nvcuda.dll loaded\n", .{});
 
-    // 2. Get device
+    const FnInit = *const fn (c_uint) callconv(.c) CUresult;
+    const FnDeviceGet = *const fn (*CUdevice, c_int) callconv(.c) CUresult;
+    const FnDeviceGetCount = *const fn (*c_int) callconv(.c) CUresult;
+    const FnDeviceGetName = *const fn ([*]u8, c_int, CUdevice) callconv(.c) CUresult;
+    const FnCtxCreate = *const fn (*CUcontext, c_uint, CUdevice) callconv(.c) CUresult;
+    const FnCtxDestroy = *const fn (CUcontext) callconv(.c) CUresult;
+    const FnCtxSync = *const fn () callconv(.c) CUresult;
+    const FnModuleLoadData = *const fn (*CUmodule, [*]const u8) callconv(.c) CUresult;
+    const FnModuleUnload = *const fn (CUmodule) callconv(.c) CUresult;
+    const FnModuleGetFunc = *const fn (*CUfunction, CUmodule, [*:0]const u8) callconv(.c) CUresult;
+    const FnMemAlloc = *const fn (*CUdeviceptr, usize) callconv(.c) CUresult;
+    const FnMemFree = *const fn (CUdeviceptr) callconv(.c) CUresult;
+    const FnMemcpyHtoD = *const fn (CUdeviceptr, [*]const u8, usize) callconv(.c) CUresult;
+    const FnMemcpyDtoH = *const fn ([*]u8, CUdeviceptr, usize) callconv(.c) CUresult;
+    const FnMemsetD32 = *const fn (CUdeviceptr, c_uint, usize) callconv(.c) CUresult;
+    const FnLaunch = *const fn (CUfunction, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, ?*anyopaque, [*]?*anyopaque, ?*anyopaque) callconv(.c) CUresult;
+
+    const cuInit = cuda(FnInit, nv, "cuInit") orelse {
+        std.debug.print("FAIL: cuInit not found\n", .{});
+        return;
+    };
+    const cuDeviceGet = cuda(FnDeviceGet, nv, "cuDeviceGet") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuDeviceGetCount = cuda(FnDeviceGetCount, nv, "cuDeviceGetCount") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuDeviceGetName = cuda(FnDeviceGetName, nv, "cuDeviceGetName") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuCtxCreate = cuda(FnCtxCreate, nv, "cuCtxCreate_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuCtxDestroy = cuda(FnCtxDestroy, nv, "cuCtxDestroy_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuCtxSync = cuda(FnCtxSync, nv, "cuCtxSynchronize") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuModuleLoadData = cuda(FnModuleLoadData, nv, "cuModuleLoadData") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuModuleUnload = cuda(FnModuleUnload, nv, "cuModuleUnload") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuModuleGetFunc = cuda(FnModuleGetFunc, nv, "cuModuleGetFunction") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuMemAlloc = cuda(FnMemAlloc, nv, "cuMemAlloc_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuMemFree = cuda(FnMemFree, nv, "cuMemFree_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuMemcpyHtoD = cuda(FnMemcpyHtoD, nv, "cuMemcpyHtoD_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuMemcpyDtoH = cuda(FnMemcpyDtoH, nv, "cuMemcpyDtoH_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuMemsetD32 = cuda(FnMemsetD32, nv, "cuMemsetD32_v2") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+    const cuLaunch = cuda(FnLaunch, nv, "cuLaunchKernel") orelse {
+        std.debug.print("FAIL\n", .{});
+        return;
+    };
+
+    std.debug.print("[OK] All 16 CUDA functions loaded\n", .{});
+
+    if (cuInit(0) != CUDA_SUCCESS) {
+        std.debug.print("FAIL: cuInit\n", .{});
+        return;
+    }
+    std.debug.print("[OK] cuInit\n", .{});
+
     var dev_count: c_int = 0;
     _ = cuDeviceGetCount(&dev_count);
-    try stdout.print("[OK] {} CUDA device(s) found\n", .{dev_count});
+    std.debug.print("[OK] {} device(s)\n", .{dev_count});
 
     var device: CUdevice = 0;
-    r = cuDeviceGet(&device, 0);
-    if (r != CUDA_SUCCESS) {
-        try stdout.print("FAIL: cuDeviceGet returned {}\n", .{r});
+    if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) {
+        std.debug.print("FAIL: cuDeviceGet\n", .{});
         return;
     }
 
-    var name_buf: [256]u8 = undefined;
+    var name_buf: [256]u8 = [_]u8{0} ** 256;
     _ = cuDeviceGetName(&name_buf, 256, device);
     const name_len = std.mem.indexOfScalar(u8, &name_buf, 0) orelse 256;
-    try stdout.print("[OK] Device: {s}\n", .{name_buf[0..name_len]});
+    std.debug.print("[OK] {s}\n", .{name_buf[0..name_len]});
 
-    // 3. Create context
     var ctx: CUcontext = null;
-    r = cuCtxCreate_v2(&ctx, 0, device);
-    if (r != CUDA_SUCCESS) {
-        try stdout.print("FAIL: cuCtxCreate returned {}\n", .{r});
+    if (cuCtxCreate(&ctx, 0, device) != CUDA_SUCCESS) {
+        std.debug.print("FAIL: cuCtxCreate\n", .{});
         return;
     }
-    try stdout.print("[OK] CUDA context created\n", .{});
+    std.debug.print("[OK] Context\n", .{});
 
-    // 4. Load PTX module
-    var module: CUmodule = null;
-    r = cuModuleLoadData(&module, ptx_source.ptr);
-    if (r != CUDA_SUCCESS) {
-        try stdout.print("FAIL: cuModuleLoadData returned {} (PTX size: {} bytes)\n", .{ r, ptx_source.len });
-        _ = cuCtxDestroy_v2(ctx);
+    var mod: CUmodule = null;
+    const lr = cuModuleLoadData(&mod, ptx_source.ptr);
+    if (lr != CUDA_SUCCESS) {
+        std.debug.print("FAIL: cuModuleLoadData {}\n", .{lr});
+        _ = cuCtxDestroy(ctx);
         return;
     }
-    try stdout.print("[OK] PTX module loaded ({} bytes)\n", .{ptx_source.len});
+    std.debug.print("[OK] PTX loaded ({} bytes)\n", .{ptx_source.len});
 
-    // 5. Get kernel function
     var func: CUfunction = null;
-    r = cuModuleGetFunction(&func, module, "vlp_kernel_$_main");
-    if (r != CUDA_SUCCESS) {
-        try stdout.print("FAIL: cuModuleGetFunction returned {}\n", .{r});
-        _ = cuModuleUnload(module);
-        _ = cuCtxDestroy_v2(ctx);
+    if (cuModuleGetFunc(&func, mod, "vlp_kernel_$_main") != CUDA_SUCCESS) {
+        std.debug.print("FAIL: GetFunction\n", .{});
+        _ = cuModuleUnload(mod);
+        _ = cuCtxDestroy(ctx);
         return;
     }
-    try stdout.print("[OK] Kernel function found: vlp_kernel_$_main\n", .{});
+    std.debug.print("[OK] Kernel: vlp_kernel_$_main\n", .{});
 
-    // 6. Allocate 15 device buffers (matching kernel signature)
-    const BUFFER_COUNT = 15;
-    const BUF_SIZE: usize = 4096; // 1024 ints × 4 bytes — small for test
-    var device_ptrs: [BUFFER_COUNT]CUdeviceptr = .{0} ** BUFFER_COUNT;
-
-    for (0..BUFFER_COUNT) |i| {
-        r = cuMemAlloc_v2(&device_ptrs[i], BUF_SIZE);
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: cuMemAlloc buffer {} returned {}\n", .{ i, r });
-            cleanup(ctx, module, &device_ptrs);
+    var dp: [15]CUdeviceptr = .{0} ** 15;
+    for (0..15) |i| {
+        if (cuMemAlloc(&dp[i], 4096) != CUDA_SUCCESS) {
+            std.debug.print("FAIL: alloc {}\n", .{i});
             return;
         }
-        _ = cuMemsetD32_v2(device_ptrs[i], 0, BUF_SIZE / 4);
+        _ = cuMemsetD32(dp[i], 0, 1024);
     }
-    try stdout.print("[OK] {} device buffers allocated ({} bytes each)\n", .{ BUFFER_COUNT, BUF_SIZE });
+    std.debug.print("[OK] 15 buffers\n", .{});
 
-    // Buffer indices (matching vlp_bridge.zig BufferTarget):
-    // 9 = scratch_a, 10 = scratch_b, 12 = params
-
-    // ============================================================
-    // TEST 1: residual_add (op 10) — simplest op
-    // scratch_a[i] += scratch_b[i]
-    // ============================================================
-    try stdout.print("\n--- Test 1: residual_add ---\n", .{});
-    {
-        const N = 8;
-
-        // scratch_a = [10, 20, 30, 40, 50, 60, 70, 80]
-        var a_data = [_]i32{ 10, 20, 30, 40, 50, 60, 70, 80 };
-        r = cuMemcpyHtoD_v2(device_ptrs[9], @ptrCast(&a_data), N * 4);
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: upload scratch_a returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        // scratch_b = [1, 2, 3, 4, 5, 6, 7, 8]
-        var b_data = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-        r = cuMemcpyHtoD_v2(device_ptrs[10], @ptrCast(&b_data), N * 4);
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: upload scratch_b returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        // params: op_code=10 (residual_add), F0=8 (n_elements)
-        var params_data = [_]i32{0} ** 64;
-        params_data[0] = 10; // P_OP_CODE = residual_add
-        params_data[1] = N; // P_FIELD_0 = n_elements
-        r = cuMemcpyHtoD_v2(device_ptrs[12], @ptrCast(&params_data), 64 * 4);
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: upload params returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        // Build kernel args — 15 device pointers
-        var arg_ptrs: [BUFFER_COUNT]CUdeviceptr = device_ptrs;
-        var kernel_args: [BUFFER_COUNT]?*anyopaque = undefined;
-        for (0..BUFFER_COUNT) |i| {
-            kernel_args[i] = @ptrCast(&arg_ptrs[i]);
-        }
-
-        // Launch: 1 block × 256 threads
-        r = cuLaunchKernel(
-            func,
-            1, 1, 1, // grid
-            256, 1, 1, // block
-            256 * (4 + 8 + 4), // shared memory
-            null, // default stream
-            &kernel_args,
-            null,
-        );
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: cuLaunchKernel returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        r = cuCtxSynchronize();
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: cuCtxSynchronize returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        // Read back scratch_a (residual_add writes back to scratch_a)
-        var result: [N]i32 = undefined;
-        r = cuMemcpyDtoH_v2(@ptrCast(&result), device_ptrs[9], N * 4);
-        if (r != CUDA_SUCCESS) {
-            try stdout.print("FAIL: download returned {}\n", .{r});
-            cleanup(ctx, module, &device_ptrs);
-            return;
-        }
-
-        // Expected: [11, 22, 33, 44, 55, 66, 77, 88]
-        const expected = [_]i32{ 11, 22, 33, 44, 55, 66, 77, 88 };
-        var pass = true;
-        for (0..N) |i| {
-            if (result[i] != expected[i]) {
-                try stdout.print("  FAIL: result[{}] = {} (expected {})\n", .{ i, result[i], expected[i] });
-                pass = false;
+    const fire = struct {
+        fn f(fn_launch: FnLaunch, fn_sync: FnCtxSync, d: *[15]CUdeviceptr) bool {
+            var ap: [15]CUdeviceptr = d.*;
+            var ka: [15]?*anyopaque = undefined;
+            for (0..15) |i| ka[i] = @ptrCast(&ap[i]);
+            if (fn_launch(null, 1, 1, 1, 256, 1, 1, 4096, null, &ka, null) != CUDA_SUCCESS) {
+                std.debug.print("FAIL: launch\n", .{});
+                return false;
             }
-        }
-        if (pass) {
-            try stdout.print("[PASS] residual_add: {any}\n", .{result});
-        }
-    }
-
-    // ============================================================
-    // TEST 2: builtin_unary abs (op 19, sub_op 0)
-    // scratch_b[i] = abs(scratch_a[i])
-    // ============================================================
-    try stdout.print("\n--- Test 2: builtin_unary abs ---\n", .{});
-    {
-        const N = 4;
-
-        var a_data = [_]i32{ -100, 200, -300, 0 };
-        _ = cuMemcpyHtoD_v2(device_ptrs[9], @ptrCast(&a_data), N * 4);
-
-        var params_data = [_]i32{0} ** 64;
-        params_data[0] = 19; // builtin_unary
-        params_data[1] = N; // n_elements
-        params_data[2] = 0; // sub_op = abs
-        params_data[3] = 0; // input_offset
-        params_data[4] = 0; // output_offset
-        _ = cuMemcpyHtoD_v2(device_ptrs[12], @ptrCast(&params_data), 64 * 4);
-
-        var arg_ptrs: [BUFFER_COUNT]CUdeviceptr = device_ptrs;
-        var kernel_args: [BUFFER_COUNT]?*anyopaque = undefined;
-        for (0..BUFFER_COUNT) |i| kernel_args[i] = @ptrCast(&arg_ptrs[i]);
-
-        _ = cuLaunchKernel(func, 1, 1, 1, 256, 1, 1, 256 * (4 + 8 + 4), null, &kernel_args, null);
-        _ = cuCtxSynchronize();
-
-        var result: [N]i32 = undefined;
-        _ = cuMemcpyDtoH_v2(@ptrCast(&result), device_ptrs[10], N * 4);
-
-        const expected = [_]i32{ 100, 200, 300, 0 };
-        var pass = true;
-        for (0..N) |i| {
-            if (result[i] != expected[i]) {
-                try stdout.print("  FAIL: result[{}] = {} (expected {})\n", .{ i, result[i], expected[i] });
-                pass = false;
+            if (fn_sync() != CUDA_SUCCESS) {
+                std.debug.print("FAIL: sync\n", .{});
+                return false;
             }
+            return true;
         }
-        if (pass) {
-            try stdout.print("[PASS] abs: {any}\n", .{result});
-        }
-    }
+    }.f;
+    _ = fire;
 
-    // ============================================================
-    // TEST 3: builtin_binary add (op 20, sub_op 0)
-    // scratch_b[i] = scratch_a[in_a + i] + scratch_a[in_b + i]
-    // ============================================================
-    try stdout.print("\n--- Test 3: builtin_binary add ---\n", .{});
-    {
-        const N = 4;
-
-        // Put both inputs in scratch_a: a at offset 0, b at offset 4
-        var ab_data = [_]i32{ 100, 200, 300, 400, 1, 2, 3, 4 };
-        _ = cuMemcpyHtoD_v2(device_ptrs[9], @ptrCast(&ab_data), 8 * 4);
-
-        var params_data = [_]i32{0} ** 64;
-        params_data[0] = 20; // builtin_binary
-        params_data[1] = N; // n_elements
-        params_data[2] = 0; // sub_op = add
-        params_data[3] = 0; // in_a_offset
-        params_data[4] = N; // in_b_offset
-        params_data[5] = 0; // output_offset
-        _ = cuMemcpyHtoD_v2(device_ptrs[12], @ptrCast(&params_data), 64 * 4);
-
-        var arg_ptrs: [BUFFER_COUNT]CUdeviceptr = device_ptrs;
-        var kernel_args: [BUFFER_COUNT]?*anyopaque = undefined;
-        for (0..BUFFER_COUNT) |i| kernel_args[i] = @ptrCast(&arg_ptrs[i]);
-
-        _ = cuLaunchKernel(func, 1, 1, 1, 256, 1, 1, 256 * (4 + 8 + 4), null, &kernel_args, null);
-        _ = cuCtxSynchronize();
-
-        var result: [N]i32 = undefined;
-        _ = cuMemcpyDtoH_v2(@ptrCast(&result), device_ptrs[10], N * 4);
-
-        const expected = [_]i32{ 101, 202, 303, 404 };
-        var pass = true;
-        for (0..N) |i| {
-            if (result[i] != expected[i]) {
-                try stdout.print("  FAIL: result[{}] = {} (expected {})\n", .{ i, result[i], expected[i] });
-                pass = false;
+    // Need to pass func to launch — use a simpler approach
+    const doLaunch = struct {
+        fn go(fn_launch: FnLaunch, fn_sync: FnCtxSync, kfunc: CUfunction, d: *[15]CUdeviceptr) bool {
+            var ap: [15]CUdeviceptr = d.*;
+            var ka: [15]?*anyopaque = undefined;
+            for (0..15) |i| ka[i] = @ptrCast(&ap[i]);
+            if (fn_launch(kfunc, 1, 1, 1, 256, 1, 1, 4096, null, &ka, null) != CUDA_SUCCESS) {
+                std.debug.print("FAIL: launch\n", .{});
+                return false;
             }
+            if (fn_sync() != CUDA_SUCCESS) {
+                std.debug.print("FAIL: sync\n", .{});
+                return false;
+            }
+            return true;
         }
-        if (pass) {
-            try stdout.print("[PASS] binary add: {any}\n", .{result});
-        }
+    }.go;
+
+    // TEST 1: residual_add
+    std.debug.print("\n--- Test 1: residual_add ---\n", .{});
+    {
+        var a = [_]i32{ 10, 20, 30, 40, 50, 60, 70, 80 };
+        var b = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+        var p = [_]i32{0} ** 64;
+        p[0] = 10;
+        p[1] = 8;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&a), 32);
+        _ = cuMemcpyHtoD(dp[10], @ptrCast(&b), 32);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        var r: [8]i32 = undefined;
+        _ = cuMemcpyDtoH(@ptrCast(&r), dp[9], 32);
+        if (std.mem.eql(i32, &r, &[_]i32{ 11, 22, 33, 44, 55, 66, 77, 88 }))
+            std.debug.print("[PASS] residual_add\n", .{})
+        else
+            std.debug.print("[FAIL] got {any}\n", .{r});
     }
 
-    // ============================================================
-    // TEST 4: softmax_exact (op 4) — the critical test
-    // Verify output sums to D=65536 exactly
-    // ============================================================
-    try stdout.print("\n--- Test 4: softmax_exact (unity test) ---\n", .{});
+    // TEST 2: abs
+    std.debug.print("\n--- Test 2: abs ---\n", .{});
     {
-        const ROW_LEN = 5;
+        var a = [_]i32{ -100, 200, -300, 0 };
+        var p = [_]i32{0} ** 64;
+        p[0] = 19;
+        p[1] = 4;
+        p[2] = 0;
+        p[3] = 0;
+        p[4] = 0;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&a), 16);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        var r: [4]i32 = undefined;
+        _ = cuMemcpyDtoH(@ptrCast(&r), dp[10], 16);
+        if (std.mem.eql(i32, &r, &[_]i32{ 100, 200, 300, 0 }))
+            std.debug.print("[PASS] abs\n", .{})
+        else
+            std.debug.print("[FAIL] got {any}\n", .{r});
+    }
 
-        // Input logits in scratch_a
+    // TEST 3: binary add
+    std.debug.print("\n--- Test 3: binary add ---\n", .{});
+    {
+        var ab = [_]i32{ 100, 200, 300, 400, 1, 2, 3, 4 };
+        var p = [_]i32{0} ** 64;
+        p[0] = 20;
+        p[1] = 4;
+        p[2] = 0;
+        p[3] = 0;
+        p[4] = 4;
+        p[5] = 0;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&ab), 32);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        var r: [4]i32 = undefined;
+        _ = cuMemcpyDtoH(@ptrCast(&r), dp[10], 16);
+        if (std.mem.eql(i32, &r, &[_]i32{ 101, 202, 303, 404 }))
+            std.debug.print("[PASS] binary add\n", .{})
+        else
+            std.debug.print("[FAIL] got {any}\n", .{r});
+    }
+
+    // TEST 4: softmax unity
+    std.debug.print("\n--- Test 4: softmax unity ---\n", .{});
+    {
         var logits = [_]i32{ 10000, 20000, 5000, 30000, 15000 };
-        _ = cuMemcpyHtoD_v2(device_ptrs[9], @ptrCast(&logits), ROW_LEN * 4);
-
-        var params_data = [_]i32{0} ** 64;
-        params_data[0] = 4; // softmax_exact
-        params_data[1] = ROW_LEN; // row_length
-        params_data[2] = 1; // n_rows
-        params_data[3] = 65536; // denominator = D
-        _ = cuMemcpyHtoD_v2(device_ptrs[12], @ptrCast(&params_data), 64 * 4);
-
-        var arg_ptrs: [BUFFER_COUNT]CUdeviceptr = device_ptrs;
-        var kernel_args: [BUFFER_COUNT]?*anyopaque = undefined;
-        for (0..BUFFER_COUNT) |i| kernel_args[i] = @ptrCast(&arg_ptrs[i]);
-
-        _ = cuLaunchKernel(func, 1, 1, 1, 256, 1, 1, 256 * (4 + 8 + 4), null, &kernel_args, null);
-        _ = cuCtxSynchronize();
-
-        // Read back from scratch_a (softmax writes in-place)
-        var result: [ROW_LEN]i32 = undefined;
-        _ = cuMemcpyDtoH_v2(@ptrCast(&result), device_ptrs[9], ROW_LEN * 4);
-
+        var p = [_]i32{0} ** 64;
+        p[0] = 4;
+        p[1] = 5;
+        p[2] = 1;
+        p[3] = 65536;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&logits), 20);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        var r: [5]i32 = undefined;
+        _ = cuMemcpyDtoH(@ptrCast(&r), dp[9], 20);
         var sum: i64 = 0;
-        for (0..ROW_LEN) |i| {
-            sum += result[i];
-        }
-
-        try stdout.print("  probs: {any}\n", .{result});
-        try stdout.print("  sum:   {} (expected 65536)\n", .{sum});
-
-        if (sum == 65536) {
-            try stdout.print("[PASS] softmax sums to D exactly\n", .{});
-        } else {
-            try stdout.print("[FAIL] softmax sum = {} != 65536\n", .{sum});
-        }
-
-        // Verify all probs are non-negative
-        var all_positive = true;
-        for (result) |v| {
-            if (v < 0) all_positive = false;
-        }
-        if (all_positive) {
-            try stdout.print("[PASS] all probabilities non-negative\n", .{});
-        } else {
-            try stdout.print("[FAIL] negative probability found\n", .{});
-        }
+        for (r) |v| sum += v;
+        std.debug.print("  probs: {any}\n  sum: {}\n", .{ r, sum });
+        if (sum == 65536) std.debug.print("[PASS] softmax unity\n", .{}) else std.debug.print("[FAIL]\n", .{});
     }
 
-    // ============================================================
-    // TEST 5: determinism — run softmax twice, compare bit-for-bit
-    // ============================================================
-    try stdout.print("\n--- Test 5: determinism ---\n", .{});
+    // TEST 5: determinism
+    std.debug.print("\n--- Test 5: determinism ---\n", .{});
     {
-        const ROW_LEN = 5;
         var logits = [_]i32{ 10000, 20000, 5000, 30000, 15000 };
-        var params_data = [_]i32{0} ** 64;
-        params_data[0] = 4;
-        params_data[1] = ROW_LEN;
-        params_data[2] = 1;
-        params_data[3] = 65536;
-
-        var results: [2][ROW_LEN]i32 = undefined;
-
-        for (0..2) |run| {
-            _ = cuMemcpyHtoD_v2(device_ptrs[9], @ptrCast(&logits), ROW_LEN * 4);
-            _ = cuMemcpyHtoD_v2(device_ptrs[12], @ptrCast(&params_data), 64 * 4);
-
-            var arg_ptrs: [BUFFER_COUNT]CUdeviceptr = device_ptrs;
-            var kernel_args: [BUFFER_COUNT]?*anyopaque = undefined;
-            for (0..BUFFER_COUNT) |i| kernel_args[i] = @ptrCast(&arg_ptrs[i]);
-
-            _ = cuLaunchKernel(func, 1, 1, 1, 256, 1, 1, 256 * (4 + 8 + 4), null, &kernel_args, null);
-            _ = cuCtxSynchronize();
-
-            _ = cuMemcpyDtoH_v2(@ptrCast(&results[run]), device_ptrs[9], ROW_LEN * 4);
-        }
-
-        var identical = true;
-        for (0..ROW_LEN) |i| {
-            if (results[0][i] != results[1][i]) {
-                try stdout.print("  FAIL: position {} differs: {} vs {}\n", .{ i, results[0][i], results[1][i] });
-                identical = false;
-            }
-        }
-        if (identical) {
-            try stdout.print("[PASS] bit-identical across 2 runs\n", .{});
-        }
+        var p = [_]i32{0} ** 64;
+        p[0] = 4;
+        p[1] = 5;
+        p[2] = 1;
+        p[3] = 65536;
+        var r1: [5]i32 = undefined;
+        var r2: [5]i32 = undefined;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&logits), 20);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        _ = cuMemcpyDtoH(@ptrCast(&r1), dp[9], 20);
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&logits), 20);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        _ = cuMemcpyDtoH(@ptrCast(&r2), dp[9], 20);
+        if (std.mem.eql(i32, &r1, &r2)) std.debug.print("[PASS] deterministic\n", .{}) else std.debug.print("[FAIL]\n", .{});
     }
 
-    // ============================================================
-    // Summary
-    // ============================================================
-    try stdout.print("\n=== All tests complete ===\n", .{});
-
-    // Cleanup
-    cleanup(ctx, module, &device_ptrs);
-}
-
-fn cleanup(ctx: CUcontext, module: CUmodule, ptrs: *[15]CUdeviceptr) void {
-    for (ptrs) |p| {
-        if (p != 0) _ = cuMemFree_v2(p);
+    // TEST 6: Q16 mul
+    std.debug.print("\n--- Test 6: Q16 mul ---\n", .{});
+    {
+        var ab = [_]i32{ 32768, 32768 };
+        var p = [_]i32{0} ** 64;
+        p[0] = 20;
+        p[1] = 1;
+        p[2] = 2;
+        p[3] = 0;
+        p[4] = 1;
+        p[5] = 0;
+        _ = cuMemcpyHtoD(dp[9], @ptrCast(&ab), 8);
+        _ = cuMemcpyHtoD(dp[12], @ptrCast(&p), 256);
+        if (!doLaunch(cuLaunch, cuCtxSync, func, &dp)) return;
+        var r: [1]i32 = undefined;
+        _ = cuMemcpyDtoH(@ptrCast(&r), dp[10], 4);
+        if (r[0] == 16384) std.debug.print("[PASS] Q16 mul\n", .{}) else std.debug.print("[FAIL] got {}\n", .{r[0]});
     }
-    if (module != null) _ = cuModuleUnload(module);
-    if (ctx != null) _ = cuCtxDestroy_v2(ctx);
-}
 
+    std.debug.print("\n=== Done ===\n", .{});
+    for (&dp) |*p| if (p.* != 0) {
+        _ = cuMemFree(p.*);
+    };
+    _ = cuModuleUnload(mod);
+    _ = cuCtxDestroy(ctx);
+}

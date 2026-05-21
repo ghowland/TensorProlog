@@ -4,14 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ============================================================
-    // Step 1: Build PTX kernel
-    // ============================================================
-
+    // Step 1: PTX kernel
     const ptx_target = b.resolveTargetQuery(.{
         .cpu_arch = .nvptx64,
         .os_tag = .freestanding,
-        .cpu_model = .{ .explicit = &std.Target.nvptx.cpu.sm_61 },
+        .cpu_model = .{ .explicit = &std.Target.nvptx.cpu.sm_75 },
     });
 
     const gpu_shared_kernel = b.createModule(.{
@@ -35,17 +32,13 @@ pub fn build(b: *std.Build) void {
     const install_ptx = b.addInstallFile(ptx_kernel.getEmittedAsm(), "vlp_kernel.ptx");
     b.getInstallStep().dependOn(&install_ptx.step);
 
-    // ============================================================
-    // Step 2: Build test binary
-    // ============================================================
-
+    // Step 2: Test binary
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/test_ptx.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // Embed PTX into test binary
     test_module.addAnonymousImport("vlp_kernel_ptx", .{
         .root_source_file = ptx_kernel.getEmittedAsm(),
     });
@@ -55,11 +48,8 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
-    test_exe.linkLibC();
-
     b.installArtifact(test_exe);
 
-    // Run step
     const run_cmd = b.addRunArtifact(test_exe);
     const run_step = b.step("test", "Run PTX GPU tests");
     run_step.dependOn(&run_cmd.step);

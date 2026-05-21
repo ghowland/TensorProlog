@@ -392,3 +392,18 @@ pub const WARP_SIZE: i32 = 32;
 pub const SHARED_MEM_BASELINE: i32 = 32 * 1024;
 pub const SHARED_MEM_EXTENDED: i32 = 64 * 1024;
 pub const SHARED_MEM_H100: i32 = 228 * 1024;
+
+// pub fn unifyCandidates(n_cand: i32, q_type: i32, q_atom: i32, q_int: i32, q_vdr_v: i32, q_vdr_r0_r1: i32, q_func: i32, q_argc: i32, q_argoff: i32, max_bind: i32) UnifyCandidatesParams {
+//     var buf = initParams(.unify_candidates);
+//     buf[@intCast(shared.P_FIELD_0)] = n_cand;
+//     buf[@intCast(shared.P_FIELD_1)] = q_type;
+//     buf[@intCast(shared.P_FIELD_2)] = q_atom;
+//     buf[@intCast(shared.P_FIELD_3)] = q_int;
+//     buf[@intCast(shared.P_FIELD_4)] = q_vdr_v;
+//     buf[@intCast(shared.P_FIELD_5)] = q_vdr_r0_r1; // packed: r0 lower 16, r1 upper 16
+//     buf[@intCast(shared.P_FIELD_6)] = q_func;
+//     buf[@intCast(shared.P_FIELD_7)] = q_argc;
+//     buf[@intCast(shared.P_FIELD_8)] = q_argoff;
+//     buf[@intCast(shared.P_FIELD_9)] = max_bind;
+//     return buf;
+// }

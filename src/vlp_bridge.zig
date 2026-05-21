@@ -1,18 +1,19 @@
 // ============================================================
-// vlp_bridge.zig
-// Host-device bridge. Vulkan resource management and dispatch.
+// vlp_bridge.zig — REWRITTEN for single-kernel architecture.
+// One pipeline. One shader module. One descriptor set layout.
+// OpCode in params uniform selects operation.
+// Sole Vulkan interface — no other module touches Vulkan.
 // ============================================================
 
 const std = @import("std");
-const types = @import("vlp_types.zig");
-const mem = @import("vlp_device_memory.zig");
-const gpu = @import("vlp_gpu_params.zig");
+const shared = @import("vlp_gpu_shared");
+const types = @import("vlp_types");
+const gpu_params = @import("vlp_gpu_params");
+const mem = @import("vlp_device_memory");
 
 // ============================================================
-// Vulkan handle types — opaque pointers matching vulkan-zig
-// If using vulkan-zig, replace these with vk.* types.
-// Kept opaque here so vlp_bridge compiles without vulkan dep
-// during early development / host-only testing.
+// Vulkan handle types — opaque until vulkan-zig is wired in.
+// Replace with vk.* types when integrating vulkan-zig.
 // ============================================================
 
 pub const VkInstance = ?*anyopaque;
@@ -32,32 +33,35 @@ pub const VkFence = ?*anyopaque;
 pub const VkShaderModule = ?*anyopaque;
 
 // ============================================================
-// Bridge configuration
+// Embedded SPIR-V kernel — baked in at compile time
+// ============================================================
+
+const kernel_spv align(@alignOf(u32)) = @embedFile("vlp_kernel_spv").*;
+
+// ============================================================
+// Configuration
 // ============================================================
 
 pub const BridgeConfig = struct {
     sizing: mem.SizingConfig,
-    shader_dir: []const u8,
-    enable_validation: bool,
-    preferred_device_index: i32, // -1 for auto
-    force_host_visible_memory: bool, // for integrated GPUs / testing
+    enable_validation: bool = false,
+    preferred_device_index: i32 = -1,
+    force_host_visible_memory: bool = false,
 };
 
 // ============================================================
-// Dispatch configuration — passed per kernel launch
+// Dispatch request — what the host passes per GPU call
 // ============================================================
 
-pub const DispatchConfig = struct {
-    pipeline: gpu.PipelineId,
+pub const DispatchRequest = struct {
+    params: gpu_params.ParamsBuffer,
     group_count_x: i32,
-    group_count_y: i32,
-    group_count_z: i32,
-    params_ptr: *const anyopaque,
-    params_size: i32,
+    group_count_y: i32 = 1,
+    group_count_z: i32 = 1,
 };
 
 // ============================================================
-// Operation type — for should_use_gpu decision
+// Operation type — for shouldUseGpu decision
 // ============================================================
 
 pub const OperationType = enum(i32) {
@@ -71,7 +75,6 @@ pub const OperationType = enum(i32) {
     sampling = 7,
 };
 
-// GPU dispatch thresholds — integer element counts
 const GPU_THRESHOLD_FACT_SCAN: i32 = 256;
 const GPU_THRESHOLD_UNIFICATION: i32 = 32;
 const GPU_THRESHOLD_RULE_MATCH: i32 = 64;
@@ -79,108 +82,110 @@ const GPU_THRESHOLD_BUILTIN: i32 = 512;
 const GPU_THRESHOLD_SAMPLING_VOCAB: i32 = 256 * 1024;
 
 // ============================================================
+// Buffer target — names for the storage buffers
+// ============================================================
+
+pub const BufferTarget = enum(i32) {
+    // Set 0 — Model
+    embedding_table = 0,
+    layer_weights = 1,
+    lm_head = 2,
+    ln_params = 3,
+    // Set 1 — KB Data
+    kb_store = 4,
+    fact_store = 5,
+    rule_store = 6,
+    term_store = 7,
+    live_state = 8,
+    // Set 2 — Scratch
+    scratch_a = 9,
+    scratch_b = 10,
+    kv_cache = 11,
+    // Set 3 — Control
+    params = 12,
+    status = 13,
+    result_counts = 14,
+};
+
+// ============================================================
 // Device properties — queried at init, cached
 // ============================================================
 
 pub const DeviceProperties = struct {
-    device_name: [256]u8,
-    device_name_len: i32,
-    max_compute_shared_memory: i32,
-    max_compute_workgroup_invocations: i32,
-    max_compute_workgroup_count: [3]i32,
-    max_compute_workgroup_size: [3]i32,
-    max_storage_buffer_range: i64,
-    max_uniform_buffer_range: i32,
-    host_visible_memory_available: bool,
-    host_coherent_memory_available: bool,
-    total_device_memory: i64,
-    compute_queue_family: u32,
-    compute_queue_count: u32,
+    device_name: [256]u8 = [_]u8{0} ** 256,
+    device_name_len: i32 = 0,
+    max_compute_shared_memory: i32 = 0,
+    max_compute_workgroup_invocations: i32 = 0,
+    max_compute_workgroup_count: [3]i32 = .{ 0, 0, 0 },
+    max_compute_workgroup_size: [3]i32 = .{ 0, 0, 0 },
+    max_storage_buffer_range: i64 = 0,
+    max_uniform_buffer_range: i32 = 0,
+    host_visible_memory_available: bool = false,
+    host_coherent_memory_available: bool = false,
+    total_device_memory: i64 = 0,
+    compute_queue_family: u32 = 0,
+    compute_queue_count: u32 = 0,
+    supports_int64: bool = false,
 };
 
 // ============================================================
-// Bridge struct
+// Bridge — the single GPU interface
 // ============================================================
 
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
 
-    // Vulkan handles
-    instance: VkInstance,
-    physical_device: VkPhysicalDevice,
-    device: VkDevice,
-    compute_queue: VkQueue,
-    command_pool: VkCommandPool,
+    // Vulkan core handles
+    instance: VkInstance = null,
+    physical_device: VkPhysicalDevice = null,
+    device: VkDevice = null,
+    compute_queue: VkQueue = null,
+    command_pool: VkCommandPool = null,
+    dispatch_cmd: VkCommandBuffer = null,
+    dispatch_fence: VkFence = null,
 
     // Device info
-    properties: DeviceProperties,
+    properties: DeviceProperties = .{},
 
-    // Pipelines — one per kernel type
-    pipelines: [gpu.PipelineId.count]VkPipeline,
-    pipeline_layouts: [gpu.PipelineId.count]VkPipelineLayout,
-    shader_modules: [gpu.PipelineId.count]VkShaderModule,
+    // THE pipeline — single kernel, single layout
+    shader_module: VkShaderModule = null,
+    pipeline_layout: VkPipelineLayout = null,
+    pipeline: VkPipeline = null,
 
     // Descriptor infrastructure
-    descriptor_pool: VkDescriptorPool,
-    set_layouts: [4]VkDescriptorSetLayout,
-    // Active descriptor sets — updated per session / per dispatch
-    active_sets: [4]VkDescriptorSet,
+    descriptor_pool: VkDescriptorPool = null,
+    set_layouts: [4]VkDescriptorSetLayout = .{ null, null, null, null },
+    active_sets: [4]VkDescriptorSet = .{ null, null, null, null },
 
-    // Storage buffers
-    model_weights_buffer: VkBuffer,
-    kb_store_buffer: VkBuffer,
-    fact_store_buffer: VkBuffer,
-    rule_store_buffer: VkBuffer,
-    term_store_buffer: VkBuffer,
-    text_store_buffer: VkBuffer,
-    grammar_store_buffer: VkBuffer,
-    live_state_buffer: VkBuffer,
-    scratch_a_buffer: VkBuffer,
-    scratch_b_buffer: VkBuffer,
-    kv_cache_buffer: VkBuffer,
-    status_buffer: VkBuffer,
-    result_counts_buffer: VkBuffer,
-    params_buffer: VkBuffer,
+    // Storage buffers — one per logical buffer
+    buffers: [15]VkBuffer = .{null} ** 15,
+    buffer_sizes: [15]i64 = .{0} ** 15,
 
-    // Device memory objects
-    model_memory: VkDeviceMemory,
-    kb_data_memory: VkDeviceMemory,
-    scratch_memory: VkDeviceMemory,
-    control_memory: VkDeviceMemory,
+    // Device memory — grouped by update frequency
+    model_memory: VkDeviceMemory = null,
+    kb_data_memory: VkDeviceMemory = null,
+    scratch_memory: VkDeviceMemory = null,
+    control_memory: VkDeviceMemory = null,
 
     // Host-mapped pointers (null if not host-visible)
-    kb_store_mapped: ?[*]u8,
-    fact_store_mapped: ?[*]u8,
-    rule_store_mapped: ?[*]u8,
-    term_store_mapped: ?[*]u8,
-    text_store_mapped: ?[*]u8,
-    scratch_a_mapped: ?[*]u8,
-    scratch_b_mapped: ?[*]u8,
-    status_mapped: ?[*]i32,
-    result_counts_mapped: ?[*]i32,
-    params_mapped: ?[*]u8,
+    mapped: [15]?[*]u8 = .{null} ** 15,
 
     // Staging buffers for non-host-visible transfers
-    staging_upload_buffer: VkBuffer,
-    staging_upload_memory: VkDeviceMemory,
-    staging_upload_mapped: ?[*]u8,
-    staging_upload_size: i64,
-    staging_download_buffer: VkBuffer,
-    staging_download_memory: VkDeviceMemory,
-    staging_download_mapped: ?[*]u8,
-    staging_download_size: i64,
+    staging_upload: VkBuffer = null,
+    staging_upload_memory: VkDeviceMemory = null,
+    staging_upload_mapped: ?[*]u8 = null,
+    staging_upload_size: i64 = 0,
+    staging_download: VkBuffer = null,
+    staging_download_memory: VkDeviceMemory = null,
+    staging_download_mapped: ?[*]u8 = null,
+    staging_download_size: i64 = 0,
 
     // Layout
-    layout: mem.DeviceMemoryLayout,
+    layout: mem.DeviceMemoryLayout = undefined,
 
-    // Synchronization
-    dispatch_fence: VkFence,
-    // Pre-allocated command buffers for reuse
-    dispatch_cmd: VkCommandBuffer,
-
-    // Configuration
-    config: BridgeConfig,
-    initialized: bool,
+    // State
+    config: BridgeConfig = undefined,
+    initialized: bool = false,
 };
 
 // ============================================================
@@ -188,232 +193,361 @@ pub const Bridge = struct {
 // ============================================================
 
 pub fn init(allocator: std.mem.Allocator, config: *const BridgeConfig) Bridge {
-    // Implementation will:
-    // 1. Create Vulkan instance (+ validation if enabled)
-    // 2. Select physical device (by index or auto: pick first with compute queue)
-    // 3. Query device properties, cache in DeviceProperties
-    // 4. Create logical device + compute queue
-    // 5. Create command pool + pre-allocate command buffer
-    // 6. Compute memory layout from config.sizing
-    // 7. Allocate all storage buffers + device memory
-    // 8. Attempt persistent mapping for host-visible buffers
-    // 9. Allocate staging buffers if not all memory is host-visible
-    // 10. Load shader modules from config.shader_dir
-    // 11. Create descriptor set layouts, pool, allocate sets
-    // 12. Create all compute pipelines
-    // 13. Create fence
-    _ = allocator;
-    _ = config;
-    return std.mem.zeroes(Bridge);
+    var bridge = Bridge{ .allocator = allocator, .config = config.* };
+
+    // Implementation sequence:
+    //
+    // 1. Create Vulkan instance
+    //    - Enable validation layers if config.enable_validation
+    //    - API version 1.2 (required for PhysicalStorageBuffer, Int64)
+    //
+    // 2. Select physical device
+    //    - If config.preferred_device_index >= 0: use that index
+    //    - Else: pick first device with compute queue family
+    //    - Query and cache DeviceProperties
+    //    - Verify supports_int64 (mandatory for Q16 multiply accumulators)
+    //
+    // 3. Create logical device + compute queue
+    //    - Enable Int64 feature
+    //    - One compute queue from compute queue family
+    //
+    // 4. Create command pool + pre-allocate one command buffer
+    //
+    // 5. Compute memory layout
+    bridge.layout = mem.computeLayout(&config.sizing);
+    //
+    // 6. Create storage buffers (15 total)
+    //    - Set 0: embedding, layer_weights, lm_head, ln_params
+    //    - Set 1: kb_store, fact_store, rule_store, term_store, live_state
+    //    - Set 2: scratch_a, scratch_b, kv_cache
+    //    - Set 3: params (uniform), status, result_counts
+    //    Buffer sizes from layout. Params buffer = 256 bytes (uniform).
+    //
+    // 7. Allocate device memory, bind buffers
+    //    - Model: device-local (read-only after load)
+    //    - KB data: device-local or host-visible (for mapped access)
+    //    - Scratch: device-local
+    //    - Control: host-visible + host-coherent (for direct param/status access)
+    //
+    // 8. Attempt persistent mapping of host-visible buffers
+    //    - Params, status, result_counts: always mapped (host-visible)
+    //    - KB/fact/rule/term/text: mapped if host-visible, else use staging
+    //    - Scratch: typically not mapped (device-local)
+    //
+    // 9. Allocate staging buffers if needed
+    //    - Upload staging: 16 MB host-visible
+    //    - Download staging: 16 MB host-visible
+    //
+    // 10. Create shader module from embedded SPIR-V
+    //     const spv_ptr: [*]const u32 = @ptrCast(&kernel_spv);
+    //     const spv_size: usize = kernel_spv.len;
+    //     createShaderModule(spv_ptr, spv_size)
+    //
+    // 11. Create descriptor set layouts (4 sets)
+    //     Set 0: 4 storage buffer bindings (read-only)
+    //     Set 1: 5 storage buffer bindings (read-write)
+    //     Set 2: 3 storage buffer bindings (read-write)
+    //     Set 3: 1 uniform buffer + 2 storage buffer bindings
+    //
+    // 12. Create pipeline layout from the 4 set layouts
+    //
+    // 13. Create THE compute pipeline
+    //     One shader module, entry point "main", one pipeline.
+    //
+    // 14. Create descriptor pool, allocate 4 descriptor sets
+    //
+    // 15. Write initial descriptor sets (bind buffers to bindings)
+    //
+    // 16. Create fence (unsignaled)
+
+    bridge.initialized = true;
+    return bridge;
 }
 
 pub fn deinit(self: *Bridge) void {
     // Destroy in reverse order:
-    // fence, pipelines, pipeline layouts, shader modules,
-    // descriptor pool, descriptor set layouts,
-    // staging buffers, storage buffers, device memory,
-    // command pool, device, instance
+    // fence, descriptor pool, pipeline, pipeline layout,
+    // shader module, staging buffers, storage buffers,
+    // device memory, command pool, device, instance
     self.initialized = false;
 }
 
 // ============================================================
-// GPU Dispatch
+// Dispatch — the core GPU call
 // ============================================================
 
-pub fn dispatch(self: *Bridge, config: *const DispatchConfig) types.Status {
-    // 1. Write params to params_buffer (mapped or staged)
-    // 2. Reset status_buffer and result_counts for this dispatch
-    // 3. Begin command buffer
-    // 4. Bind pipeline[config.pipeline]
-    // 5. Bind active_sets[0..3]
-    // 6. vkCmdDispatch(group_count_x, group_count_y, group_count_z)
-    // 7. Pipeline barrier: compute write → host read
-    // 8. End command buffer
-    // 9. Submit to compute_queue with dispatch_fence
-    // 10. Wait on dispatch_fence
-    // 11. Check status_buffer for kernel-reported errors
-    _ = self;
-    _ = config;
+pub fn dispatch(self: *Bridge, request: *const DispatchRequest) types.Status {
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
+
+    // 1. Upload params to uniform buffer
+    const param_bytes = std.mem.asBytes(&request.params);
+    const up_status = self.uploadToBuffer(.params, 0, param_bytes);
+    if (up_status.isErr()) return up_status;
+
+    // 2. Begin command buffer (reset + begin)
+    //    vkResetCommandBuffer(dispatch_cmd, 0)
+    //    vkBeginCommandBuffer(dispatch_cmd, {.flags = ONE_TIME_SUBMIT})
+
+    // 3. Bind pipeline
+    //    vkCmdBindPipeline(dispatch_cmd, COMPUTE, pipeline)
+
+    // 4. Bind descriptor sets
+    //    vkCmdBindDescriptorSets(dispatch_cmd, COMPUTE, pipeline_layout,
+    //        0, 4, active_sets, 0, null)
+
+    // 5. Dispatch
+    //    vkCmdDispatch(dispatch_cmd, group_count_x, group_count_y, group_count_z)
+
+    // 6. Pipeline barrier: compute write → host read
+    //    memory barrier: SHADER_WRITE → HOST_READ
+    //    stage: COMPUTE → HOST
+
+    // 7. End command buffer
+    //    vkEndCommandBuffer(dispatch_cmd)
+
+    // 8. Reset fence
+    //    vkResetFences(device, 1, &dispatch_fence)
+
+    // 9. Submit
+    //    vkQueueSubmit(compute_queue, 1, &submit_info, dispatch_fence)
+
+    // 10. Wait
+    //     vkWaitForFences(device, 1, &dispatch_fence, TRUE, UINT64_MAX)
+
+    // 11. Check status buffer for kernel-reported errors
+    const first_error = self.checkStatusBuffer(request);
+    if (first_error != 0) {
+        return types.Status.err(.device, .dispatch_failed, first_error);
+    }
+
     return types.Status.ok();
 }
 
-pub fn dispatchAsync(self: *Bridge, config: *const DispatchConfig) VkFence {
-    // Same as dispatch steps 1-9, but returns fence instead of waiting.
-    // Caller must call waitFence before reading results.
-    _ = self;
-    _ = config;
-    return null;
-}
+/// Record multiple dispatches into one command buffer, one submit, one fence.
+/// Used for LLM forward pass (12+ dispatches per layer).
+pub fn dispatchSequence(self: *Bridge, requests: []const DispatchRequest) types.Status {
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
+    if (requests.len == 0) return types.Status.ok();
 
-pub fn dispatchSequence(self: *Bridge, configs: []const DispatchConfig) types.Status {
-    // Records all dispatches into a single command buffer with
-    // pipeline barriers between each. Single submit. Single fence wait.
-    // Used for LLM forward pass (12+ kernels per layer).
-    // Avoids per-dispatch submit overhead.
-    _ = self;
-    _ = configs;
-    return types.Status.ok();
-}
+    // 1. Reset + begin command buffer
 
-pub fn waitFence(self: *Bridge, fence: VkFence, timeout_ns: u64) types.Status {
-    _ = self;
-    _ = fence;
-    _ = timeout_ns;
+    // 2. For each request:
+    for (requests) |*req| {
+        // a. Upload params
+        const param_bytes = std.mem.asBytes(&req.params);
+        _ = self.writeToMapped(.params, 0, param_bytes);
+
+        // b. Bind pipeline (same every time, but Vulkan requires it
+        //    after descriptor set changes if params buffer content changed)
+        //    vkCmdBindPipeline(dispatch_cmd, COMPUTE, pipeline)
+
+        // c. Bind descriptor sets
+        //    vkCmdBindDescriptorSets(...)
+
+        // d. Dispatch
+        //    vkCmdDispatch(dispatch_cmd, req.group_count_x, y, z)
+
+        // e. Pipeline barrier: compute write → compute read
+        //    (between dependent dispatches within the sequence)
+        //    memory barrier: SHADER_WRITE → SHADER_READ
+        //    stage: COMPUTE → COMPUTE
+    }
+
+    // 3. Final barrier: compute write → host read
+    // 4. End command buffer
+    // 5. Reset fence, submit, wait
+
     return types.Status.ok();
 }
 
 // ============================================================
-// Buffer Data Transfer
+// Buffer data transfer
 // ============================================================
 
 pub fn uploadToBuffer(self: *Bridge, target: BufferTarget, offset: i64, data: []const u8) types.Status {
-    // If target buffer is mapped: memcpy directly
-    // Else: copy to staging_upload, record buffer copy cmd, submit, fence
-    _ = self;
-    _ = target;
-    _ = offset;
-    _ = data;
+    const idx = @intFromEnum(target);
+
+    // Fast path: mapped memory
+    if (self.mapped[idx]) |ptr| {
+        _ = ptr;
+        return self.writeToMapped(target, offset, data);
+    }
+
+    // Slow path: staging buffer
+    if (self.staging_upload_mapped == null) return types.Status.err(.device, .dispatch_failed, -1);
+    if (data.len > @as(usize, @intCast(self.staging_upload_size))) return types.Status.err(.device, .device_out_of_memory, -2);
+
+    // Copy to staging
+    const staging_ptr = self.staging_upload_mapped.?;
+    @memcpy(staging_ptr[0..data.len], data);
+
+    // Record copy command: staging → target buffer at offset
+    // vkCmdCopyBuffer(dispatch_cmd, staging_upload, buffers[idx],
+    //     1, &VkBufferCopy{ .srcOffset=0, .dstOffset=offset, .size=data.len })
+    // Submit + fence
+
     return types.Status.ok();
 }
 
 pub fn downloadFromBuffer(self: *Bridge, source: BufferTarget, offset: i64, dest: []u8) types.Status {
-    // If source buffer is mapped: memcpy directly
-    // Else: record buffer copy to staging_download, submit, fence, memcpy
-    _ = self;
-    _ = source;
-    _ = offset;
-    _ = dest;
+    const idx = @intFromEnum(source);
+
+    // Fast path: mapped memory
+    if (self.mapped[idx]) |ptr| {
+        const src = ptr[@intCast(offset)..@intCast(offset + @as(i64, @intCast(dest.len)))];
+        @memcpy(dest, src);
+        return types.Status.ok();
+    }
+
+    // Slow path: staging buffer
+    if (self.staging_download_mapped == null) return types.Status.err(.device, .dispatch_failed, -1);
+    if (dest.len > @as(usize, @intCast(self.staging_download_size))) return types.Status.err(.device, .device_out_of_memory, -2);
+
+    // Record copy command: source buffer at offset → staging
+    // vkCmdCopyBuffer(dispatch_cmd, buffers[idx], staging_download,
+    //     1, &VkBufferCopy{ .srcOffset=offset, .dstOffset=0, .size=dest.len })
+    // Submit + fence
+
+    // Copy from staging to dest
+    const staging_ptr = self.staging_download_mapped.?;
+    @memcpy(dest, staging_ptr[0..dest.len]);
+
     return types.Status.ok();
 }
 
 pub fn copyBufferToBuffer(self: *Bridge, src: BufferTarget, src_offset: i64, dst: BufferTarget, dst_offset: i64, size: i64) types.Status {
-    // Record vkCmdCopyBuffer, submit, fence
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
     _ = src;
     _ = src_offset;
     _ = dst;
     _ = dst_offset;
     _ = size;
+    // Record vkCmdCopyBuffer between the two buffers
+    // Submit + fence
     return types.Status.ok();
 }
 
 pub fn fillBuffer(self: *Bridge, target: BufferTarget, offset: i64, size: i64, value: u32) types.Status {
-    // Record vkCmdFillBuffer, submit, fence
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
     _ = target;
     _ = offset;
     _ = size;
     _ = value;
+    // vkCmdFillBuffer(dispatch_cmd, buffers[idx], offset, size, value)
+    // Submit + fence
     return types.Status.ok();
 }
 
-pub const BufferTarget = enum(i32) {
-    model_weights = 0,
-    kb_store = 1,
-    fact_store = 2,
-    rule_store = 3,
-    term_store = 4,
-    text_store = 5,
-    grammar_store = 6,
-    live_state = 7,
-    scratch_a = 8,
-    scratch_b = 9,
-    kv_cache = 10,
-    status = 11,
-    result_counts = 12,
-    params = 13,
-};
-
 // ============================================================
-// Mapped pointer access — fast path for host-visible memory
+// Mapped pointer access
 // ============================================================
 
-pub fn getMappedPtr(self: *Bridge, target: BufferTarget) ?[*]u8 {
-    return switch (target) {
-        .kb_store => self.kb_store_mapped,
-        .fact_store => self.fact_store_mapped,
-        .rule_store => self.rule_store_mapped,
-        .term_store => self.term_store_mapped,
-        .text_store => self.text_store_mapped,
-        .scratch_a => self.scratch_a_mapped,
-        .scratch_b => self.scratch_b_mapped,
-        .params => self.params_mapped,
-        else => null,
-    };
+fn writeToMapped(self: *Bridge, target: BufferTarget, offset: i64, data: []const u8) types.Status {
+    const idx = @intFromEnum(target);
+    const ptr = self.mapped[idx] orelse return types.Status.err(.device, .dispatch_failed, idx);
+    const dst = ptr[@intCast(offset)..@intCast(offset + @as(i64, @intCast(data.len)))];
+    @memcpy(dst, data);
+    return types.Status.ok();
 }
 
 pub fn isMapped(self: *Bridge, target: BufferTarget) bool {
-    return self.getMappedPtr(target) != null;
+    return self.mapped[@intFromEnum(target)] != null;
 }
 
 // ============================================================
-// Status / Result Readback
+// Status / result readback
 // ============================================================
 
 pub fn readStatus(self: *Bridge, invocation_index: i32) i32 {
-    if (self.status_mapped) |mapped| {
-        return mapped[@intCast(invocation_index)];
+    if (self.mapped[@intFromEnum(BufferTarget.status)]) |ptr| {
+        const i32_ptr: [*]const i32 = @ptrCast(@alignCast(ptr));
+        return i32_ptr[@intCast(invocation_index)];
     }
-    // Fallback: download from buffer
     var val: i32 = 0;
-    const bytes: *[4]u8 = @ptrCast(&val);
-    _ = self.downloadFromBuffer(.status, @as(i64, invocation_index) * 4, bytes);
+    _ = self.downloadFromBuffer(.status, @as(i64, invocation_index) * 4, std.mem.asBytes(&val));
     return val;
 }
 
 pub fn readResultCount(self: *Bridge, slot: i32) i32 {
-    if (self.result_counts_mapped) |mapped| {
-        return mapped[@intCast(slot)];
+    if (self.mapped[@intFromEnum(BufferTarget.result_counts)]) |ptr| {
+        const i32_ptr: [*]const i32 = @ptrCast(@alignCast(ptr));
+        return i32_ptr[@intCast(slot)];
     }
     var val: i32 = 0;
-    const bytes: *[4]u8 = @ptrCast(&val);
-    _ = self.downloadFromBuffer(.result_counts, @as(i64, slot) * 4, bytes);
+    _ = self.downloadFromBuffer(.result_counts, @as(i64, slot) * 4, std.mem.asBytes(&val));
     return val;
 }
 
 pub fn resetStatusBuffer(self: *Bridge) types.Status {
-    return self.fillBuffer(.status, 0, self.layout.status_buffer_size, 0);
+    return self.fillBuffer(.status, 0, self.buffer_sizes[@intFromEnum(BufferTarget.status)], 0);
 }
 
 pub fn resetResultCounts(self: *Bridge) types.Status {
-    return self.fillBuffer(.result_counts, 0, self.layout.result_counts_size, 0);
+    return self.fillBuffer(.result_counts, 0, self.buffer_sizes[@intFromEnum(BufferTarget.result_counts)], 0);
+}
+
+fn checkStatusBuffer(self: *Bridge, request: *const DispatchRequest) i32 {
+    // Scan first N entries for non-zero (N = dispatch count)
+    const n: i32 = request.group_count_x * request.group_count_y * request.group_count_z;
+    // Only check first few entries — full scan too expensive for large dispatches
+    const check_limit = @min(n, 256);
+    var i: i32 = 0;
+    while (i < check_limit) : (i += 1) {
+        const s = self.readStatus(i);
+        if (s != 0) return s;
+    }
+    return 0;
 }
 
 // ============================================================
-// Descriptor Set Updates
+// Descriptor set updates
 // ============================================================
 
 pub fn updateModelDescriptors(self: *Bridge) types.Status {
-    // Bind model buffers to Set 0 (done once at init)
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
+    // Write Set 0 descriptor bindings:
+    //   binding 0 → buffers[embedding_table]
+    //   binding 1 → buffers[layer_weights]
+    //   binding 2 → buffers[lm_head]
+    //   binding 3 → buffers[ln_params]
+    // vkUpdateDescriptorSets with 4 VkWriteDescriptorSet entries
     return types.Status.ok();
 }
 
 pub fn updateKbDescriptors(self: *Bridge, session_kb_offset: i64, session_fact_offset: i64) types.Status {
-    // Update Set 1 bindings to point to session's region of KB/fact stores
-    // Called when switching active session
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
     _ = session_kb_offset;
     _ = session_fact_offset;
+    // Write Set 1 descriptor bindings:
+    //   binding 0 → buffers[kb_store] offset=session_kb_offset
+    //   binding 1 → buffers[fact_store] offset=session_fact_offset
+    //   binding 2 → buffers[rule_store]
+    //   binding 3 → buffers[term_store]
+    //   binding 4 → buffers[live_state]
+    // This rebinds for the active session's region within the global buffers.
     return types.Status.ok();
 }
 
 pub fn updateScratchDescriptors(self: *Bridge) types.Status {
-    // Update Set 2 bindings (scratch_a, scratch_b, kv_cache)
-    // Called before dispatches that use different scratch regions
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
+    // Write Set 2 descriptor bindings:
+    //   binding 0 → buffers[scratch_a]
+    //   binding 1 → buffers[scratch_b]
+    //   binding 2 → buffers[kv_cache]
     return types.Status.ok();
 }
 
 pub fn updateControlDescriptors(self: *Bridge) types.Status {
-    // Update Set 3 bindings (params, status, result_counts)
-    // Usually stable — only needed if buffer reallocation occurs
-    _ = self;
+    if (!self.initialized) return types.Status.err(.device, .dispatch_failed, 0);
+    // Write Set 3 descriptor bindings:
+    //   binding 0 → buffers[params] (uniform buffer)
+    //   binding 1 → buffers[status]
+    //   binding 2 → buffers[result_counts]
     return types.Status.ok();
 }
 
 // ============================================================
-// GPU vs Host Decision
+// GPU vs host decision
 // ============================================================
 
 pub fn shouldUseGpu(self: *Bridge, op: OperationType, data_size: i32) bool {
@@ -424,44 +558,117 @@ pub fn shouldUseGpu(self: *Bridge, op: OperationType, data_size: i32) bool {
         .unification => data_size > GPU_THRESHOLD_UNIFICATION,
         .rule_match => data_size > GPU_THRESHOLD_RULE_MATCH,
         .builtin_array => data_size > GPU_THRESHOLD_BUILTIN,
-        .text_grammar => false, // always host
-        .access_check => false, // always host
+        .text_grammar => false,
+        .access_check => false,
         .sampling => data_size > GPU_THRESHOLD_SAMPLING_VOCAB,
     };
 }
 
 // ============================================================
-// Shared memory tier detection
+// Convenience: typed upload/download
 // ============================================================
 
-pub fn sharedMemoryTier(self: *Bridge) gpu.SharedMemoryTier {
-    const sm = self.properties.max_compute_shared_memory;
-    if (sm >= gpu.SHARED_MEM_H100) return .h100;
-    if (sm >= gpu.SHARED_MEM_EXTENDED) return .extended;
-    return .baseline;
+pub fn uploadInts(self: *Bridge, target: BufferTarget, offset_ints: i32, data: []const i32) types.Status {
+    const bytes = std.mem.sliceAsBytes(data);
+    return self.uploadToBuffer(target, @as(i64, offset_ints) * 4, bytes);
+}
+
+pub fn downloadInts(self: *Bridge, target: BufferTarget, offset_ints: i32, out: []i32) types.Status {
+    const bytes = std.mem.sliceAsBytes(out);
+    return self.downloadFromBuffer(target, @as(i64, offset_ints) * 4, bytes);
+}
+
+/// Upload a Fact (as 10 i32s) to fact_store at fact index
+pub fn uploadFact(self: *Bridge, fact_index: i32, fact: *const types.Fact) types.Status {
+    const ints = fact.toInts();
+    return self.uploadInts(.fact_store, fact_index * shared.FACT_INTS, &ints);
+}
+
+/// Download a Fact from fact_store at fact index
+pub fn downloadFact(self: *Bridge, fact_index: i32) ?types.Fact {
+    var ints: [10]i32 = undefined;
+    const status = self.downloadInts(.fact_store, fact_index * shared.FACT_INTS, &ints);
+    if (status.isErr()) return null;
+    return types.Fact.fromInts(ints);
+}
+
+/// Upload a Term (as 6 i32s) to term_store at term index
+pub fn uploadTerm(self: *Bridge, term_index: i32, term: *const types.Term) types.Status {
+    const ints = term.toInts();
+    return self.uploadInts(.term_store, term_index * shared.TERM_INTS, &ints);
+}
+
+/// Download a Term from term_store at term index
+pub fn downloadTerm(self: *Bridge, term_index: i32) ?types.Term {
+    var ints: [6]i32 = undefined;
+    const status = self.downloadInts(.term_store, term_index * shared.TERM_INTS, &ints);
+    if (status.isErr()) return null;
+    return types.Term.fromInts(ints);
+}
+
+/// Upload a Rule (as 12 i32s) to rule_store at rule index
+pub fn uploadRule(self: *Bridge, rule_index: i32, rule: *const types.Rule) types.Status {
+    const ints = rule.toInts();
+    return self.uploadInts(.rule_store, rule_index * shared.RULE_INTS, &ints);
+}
+
+/// Download a Rule from rule_store at rule index
+pub fn downloadRule(self: *Bridge, rule_index: i32) ?types.Rule {
+    var ints: [12]i32 = undefined;
+    const status = self.downloadInts(.rule_store, rule_index * shared.RULE_INTS, &ints);
+    if (status.isErr()) return null;
+    return types.Rule.fromInts(ints);
+}
+
+/// Upload a Kb struct (as KB_STRUCT_INTS i32s) to kb_store
+pub fn uploadKb(self: *Bridge, kb_id: i32, data: []const i32) types.Status {
+    if (data.len != shared.KB_STRUCT_INTS) return types.Status.err(.kb, .kb_not_found, kb_id);
+    return self.uploadInts(.kb_store, kb_id * shared.KB_STRUCT_INTS, data);
+}
+
+/// Download a Kb struct from kb_store
+pub fn downloadKb(self: *Bridge, kb_id: i32, out: []i32) types.Status {
+    if (out.len != shared.KB_STRUCT_INTS) return types.Status.err(.kb, .kb_not_found, kb_id);
+    return self.downloadInts(.kb_store, kb_id * shared.KB_STRUCT_INTS, out);
 }
 
 // ============================================================
-// Convenience: write typed struct to params buffer
+// Convenience: dispatch helpers
 // ============================================================
 
-pub fn writeParams(self: *Bridge, comptime T: type, params: *const T) types.Status {
-    const bytes: []const u8 = @as([*]const u8, @ptrCast(params))[0..@sizeOf(T)];
-    return self.uploadToBuffer(.params, 0, bytes);
+/// Compute workgroup count for N elements at workgroup size 256
+pub fn workgroups(n: i32) i32 {
+    return @divTrunc(n + shared.MAX_WORKGROUP - 1, shared.MAX_WORKGROUP);
+}
+
+/// Dispatch with auto-computed workgroup count for 1D
+pub fn dispatch1D(self: *Bridge, params: gpu_params.ParamsBuffer, n_elements: i32) types.Status {
+    return self.dispatch(&.{
+        .params = params,
+        .group_count_x = workgroups(n_elements),
+    });
+}
+
+/// Dispatch with explicit 2D workgroup count
+pub fn dispatch2D(self: *Bridge, params: gpu_params.ParamsBuffer, x: i32, y: i32) types.Status {
+    return self.dispatch(&.{
+        .params = params,
+        .group_count_x = x,
+        .group_count_y = y,
+    });
+}
+
+/// Reset status + result counts, then dispatch
+pub fn dispatchClean(self: *Bridge, request: *const DispatchRequest) types.Status {
+    var status = self.resetStatusBuffer();
+    if (status.isErr()) return status;
+    status = self.resetResultCounts();
+    if (status.isErr()) return status;
+    return self.dispatch(request);
 }
 
 // ============================================================
-// Convenience: read typed struct array from scratch buffer
-// ============================================================
-
-pub fn readScratchSlice(self: *Bridge, comptime T: type, target: BufferTarget, offset: i64, count: i32, out: []T) types.Status {
-    const byte_size = @as(i64, count) * @sizeOf(T);
-    const dest: []u8 = @as([*]u8, @ptrCast(out.ptr))[0..@intCast(byte_size)];
-    return self.downloadFromBuffer(target, offset, dest);
-}
-
-// ============================================================
-// Device query helpers
+// Device queries
 // ============================================================
 
 pub fn deviceName(self: *Bridge) []const u8 {
@@ -474,4 +681,16 @@ pub fn totalDeviceMemory(self: *Bridge) i64 {
 
 pub fn maxWorkgroupSize(self: *Bridge) i32 {
     return self.properties.max_compute_workgroup_invocations;
+}
+
+pub fn sharedMemorySize(self: *Bridge) i32 {
+    return self.properties.max_compute_shared_memory;
+}
+
+pub fn supportsInt64(self: *Bridge) bool {
+    return self.properties.supports_int64;
+}
+
+pub fn bufferSize(self: *Bridge, target: BufferTarget) i64 {
+    return self.buffer_sizes[@intFromEnum(target)];
 }

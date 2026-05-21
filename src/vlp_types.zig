@@ -4,6 +4,55 @@
 // extern struct for anything that crosses the host-device boundary.
 // ============================================================
 
+const std = @import("std");
+
+const shared = @import("vlp_gpu_shared");
+
+// ── Re-export everything from gpu_shared ──
+
+pub const FACTS_PER_KB = shared.FACTS_PER_KB;
+pub const FACT_INTS = shared.FACT_INTS;
+pub const FACT_STRIDE = shared.FACT_STRIDE;
+pub const KB_STRUCT_INTS = shared.KB_STRUCT_INTS;
+pub const RULE_INTS = shared.RULE_INTS;
+pub const TERM_INTS = shared.TERM_INTS;
+pub const BINDING_INTS = shared.BINDING_INTS;
+pub const D16 = shared.D16;
+pub const D32 = shared.D32;
+pub const MAX_WORKGROUP = shared.MAX_WORKGROUP;
+
+pub const OpCode = shared.OpCode;
+pub const FactTag = shared.FactTag;
+pub const TermType = shared.TermType;
+pub const SourceType = shared.SourceType;
+pub const confidence_table_raw = shared.confidence_table;
+
+// Field offset constants
+pub const FACT_TAG = shared.FACT_TAG;
+pub const FACT_VALUE_V = shared.FACT_VALUE_V;
+pub const FACT_VALUE_R0 = shared.FACT_VALUE_R0;
+pub const FACT_PROV_SOURCE = shared.FACT_PROV_SOURCE;
+pub const FACT_PROV_KB = shared.FACT_PROV_KB;
+pub const FACT_PROV_SLOT = shared.FACT_PROV_SLOT;
+pub const FACT_PROV_CONF_V = shared.FACT_PROV_CONF_V;
+pub const FACT_PROV_CONF_R0 = shared.FACT_PROV_CONF_R0;
+pub const FACT_PROV_TIME = shared.FACT_PROV_TIME;
+pub const FACT_PROV_RULE = shared.FACT_PROV_RULE;
+
+pub const P_OP_CODE = shared.P_OP_CODE;
+pub const P_FIELD_0 = shared.P_FIELD_0;
+pub const P_FIELD_1 = shared.P_FIELD_1;
+pub const P_FIELD_2 = shared.P_FIELD_2;
+pub const P_FIELD_3 = shared.P_FIELD_3;
+pub const P_FIELD_4 = shared.P_FIELD_4;
+pub const P_FIELD_5 = shared.P_FIELD_5;
+pub const P_FIELD_6 = shared.P_FIELD_6;
+pub const P_FIELD_7 = shared.P_FIELD_7;
+pub const P_FIELD_8 = shared.P_FIELD_8;
+pub const P_FIELD_9 = shared.P_FIELD_9;
+
+// ── Q16 — host-side wrapper with methods ──
+
 // ---- Q-basis ----
 
 pub const QBasis = enum(i32) {
@@ -18,14 +67,14 @@ pub const Q16 = extern struct {
     r0: i16 = 0,
     r1: i16 = 0,
 
-    pub const D: i32 = 65536;
+    // pub const D: i32 = 65536;
 
     pub fn zero() Q16 {
         return .{ .v = 0 };
     }
 
     pub fn one() Q16 {
-        return .{ .v = D };
+        return .{ .v = D16 };
     }
 
     pub fn fromParts(v: i32, r0: i16, r1: i16) Q16 {
@@ -39,8 +88,8 @@ pub const Q16 = extern struct {
         const new_r1: i16 = @intCast(@mod(r1_sum, 32768));
         // r0 + r0 + carry from r1
         const r0_sum: i32 = @as(i32, a.r0) + @as(i32, b.r0) + r1_carry;
-        const r0_carry: i64 = if (r0_sum >= D) 1 else 0;
-        const new_r0: i16 = @intCast(@mod(r0_sum, D));
+        const r0_carry: i64 = if (r0_sum >= D16) 1 else 0;
+        const new_r0: i16 = @intCast(@mod(r0_sum, D16));
         // v + v + carry from r0
         const new_v: i32 = @intCast(@as(i64, a.v) + @as(i64, b.v) + r0_carry);
         return .{ .v = new_v, .r0 = new_r0, .r1 = new_r1 };
@@ -56,7 +105,7 @@ pub const Q16 = extern struct {
         var r0_diff: i32 = @as(i32, a.r0) - @as(i32, b.r0) - r1_borrow;
         var r0_borrow: i64 = 0;
         if (r0_diff < 0) {
-            r0_diff += D;
+            r0_diff += D16;
             r0_borrow = 1;
         }
         const new_v: i32 = @intCast(@as(i64, a.v) - @as(i64, b.v) - r0_borrow);
@@ -65,21 +114,21 @@ pub const Q16 = extern struct {
 
     pub fn mul(a: Q16, b: Q16) Q16 {
         const product: i64 = @as(i64, a.v) * @as(i64, b.v);
-        const new_v: i32 = @intCast(@divTrunc(product, D));
-        const r0_full: i64 = @mod(product, D);
+        const new_v: i32 = @intCast(@divTrunc(product, D16));
+        const r0_full: i64 = @mod(product, D16);
         // Second remainder: capture sub-r0 precision from r0 interactions
         const r1_product: i64 = @as(i64, a.r0) * @as(i64, b.v) + @as(i64, b.r0) * @as(i64, a.v);
-        const new_r1: i16 = @intCast(@mod(@divTrunc(r1_product, D), 32768));
+        const new_r1: i16 = @intCast(@mod(@divTrunc(r1_product, D16), 32768));
         return .{ .v = new_v, .r0 = @intCast(r0_full), .r1 = new_r1 };
     }
 
     pub fn div(a: Q16, b: Q16) Q16 {
         if (b.v == 0) return zero();
-        const widened: i64 = @as(i64, a.v) * D;
+        const widened: i64 = @as(i64, a.v) * D16;
         const new_v: i32 = @intCast(@divTrunc(widened, @as(i64, b.v)));
         const r0_full: i64 = @mod(widened, @as(i64, b.v));
         // r1: sub-quotient precision from remainder
-        const r1_widened: i64 = r0_full * D;
+        const r1_widened: i64 = r0_full * D16;
         const new_r1: i16 = @intCast(@mod(@divTrunc(r1_widened, @as(i64, b.v)), 32768));
         return .{ .v = new_v, .r0 = @intCast(r0_full), .r1 = new_r1 };
     }
@@ -119,24 +168,24 @@ pub const Q32 = extern struct {
     r0: i32,
     r1: i32,
 
-    pub const D: i64 = 4294967296; // 2^32
+    // pub const D: i64 = 4294967296; // 2^32
 
     pub fn zero() Q32 {
         return .{ .v = 0, .r0 = 0, .r1 = 0 };
     }
 
     pub fn one() Q32 {
-        return .{ .v = @intCast(D), .r0 = 0, .r1 = 0 };
+        return .{ .v = @intCast(D32), .r0 = 0, .r1 = 0 };
     }
 
     pub fn fromQ16(q: Q16) Q32 {
         // Scale v from D=65536 to D=4294967296
-        const scaled: i64 = @as(i64, q.v) * (D / Q16.D);
+        const scaled: i64 = @as(i64, q.v) * (D32 / Q16.D);
         return .{ .v = scaled, .r0 = @as(i32, q.r0), .r1 = 0 };
     }
 
     pub fn toQ16(self: Q32) Q16 {
-        const scaled: i64 = @divTrunc(self.v * Q16.D, D);
+        const scaled: i64 = @divTrunc(self.v * Q16.D, D32);
         return .{ .v = @intCast(scaled), .r0 = @intCast(@mod(self.v, Q16.D)) };
     }
 };
@@ -156,35 +205,35 @@ pub const Q335 = extern struct {
 
 // ---- Fact Types ----
 
-pub const FactTag = enum(i32) {
-    value = 0,
-    text = 1,
-    reference = 2,
-    timestamp = 3,
-    @"enum" = 4,
-    boolean = 5,
-    vector = 6,
-    matrix = 7,
-    provenance_tag = 8,
-    rule_ref = 9,
-    grammar_ref = 10,
-    counter = 11,
-    empty = 255,
-};
+// pub const FactTag = enum(i32) {
+//     value = 0,
+//     text = 1,
+//     reference = 2,
+//     timestamp = 3,
+//     @"enum" = 4,
+//     boolean = 5,
+//     vector = 6,
+//     matrix = 7,
+//     provenance_tag = 8,
+//     rule_ref = 9,
+//     grammar_ref = 10,
+//     counter = 11,
+//     empty = 255,
+// };
 
-pub const SourceType = enum(i8) {
-    vdr_computation = 0,
-    prolog_derivation = 1,
-    database = 2,
-    prometheus = 3,
-    script = 4,
-    rest_api = 5,
-    published = 6,
-    user_stated = 7,
-    web_search = 8,
-    llm_generated = 9,
-    unknown = 10,
-};
+// pub const SourceType = enum(i8) {
+//     vdr_computation = 0,
+//     prolog_derivation = 1,
+//     database = 2,
+//     prometheus = 3,
+//     script = 4,
+//     rest_api = 5,
+//     published = 6,
+//     user_stated = 7,
+//     web_search = 8,
+//     llm_generated = 9,
+//     unknown = 10,
+// };
 
 pub const Provenance = extern struct {
     source_type: i32,
@@ -328,18 +377,18 @@ pub const Kb = extern struct {
 
 // ---- Prolog Types ----
 
-pub const TermType = enum(i8) {
-    atom = 0,
-    variable = 1,
-    integer = 2,
-    vdr = 3,
-    text = 4,
-    list = 5,
-    compound = 6,
-    vector = 7,
-    matrix = 8,
-    pair = 9,
-};
+// pub const TermType = enum(i8) {
+//     atom = 0,
+//     variable = 1,
+//     integer = 2,
+//     vdr = 3,
+//     text = 4,
+//     list = 5,
+//     compound = 6,
+//     vector = 7,
+//     matrix = 8,
+//     pair = 9,
+// };
 
 pub const Term = extern struct {
     type: TermType,

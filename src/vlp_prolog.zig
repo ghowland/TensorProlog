@@ -10,6 +10,8 @@ const bridge_mod = @import("vlp_bridge.zig");
 const gpu = @import("vlp_gpu_params.zig");
 const kb_mod = @import("vlp_kb_store.zig");
 
+const shared = @import("vlp_gpu_shared");
+
 // ============================================================
 // Configuration
 // ============================================================
@@ -221,6 +223,19 @@ pub fn unifyCandidatesGpu(self: *PrologEngine, query_term: *const types.Term, ca
         .query_args_offset = query_term.secondary_offset,
         .max_bindings_per = 8,
     };
+
+    // var params = gpu.unifyCandidates(
+    //     n,
+    //     @intFromEnum(query_term.term_type),
+    //     query_term.primary_id,
+    //     query_term.primary_id,
+    //     query_term.vdr_value.v,
+    //     query_term.vdr_value.toInts()[1], // packed r0|r1
+    //     query_term.primary_id,
+    //     @intCast(query_term.secondary_aux),
+    //     query_term.secondary_offset,
+    //     shared.MAX_BINDINGS_PER,
+    // );
 
     status = self.bridge.dispatch(&.{
         .pipeline = .unify_candidates,

@@ -251,15 +251,10 @@ pub fn init(allocator: std.mem.Allocator, config: *const BridgeConfig) Bridge {
     // 6. Get kernel function handle
     // Zig mangles the name — look for the mangled form.
     // If this fails, try common mangled patterns.
-    const func_result = cuModuleGetFunction(&bridge.kernel_func, bridge.module, "main");
-    if (func_result != CUDA_SUCCESS) {
-        // Try Zig-mangled name pattern
-        const alt_result = cuModuleGetFunction(&bridge.kernel_func, bridge.module, "vlp_kernel.main");
-        if (alt_result != CUDA_SUCCESS) {
-            cuModuleUnload(bridge.module);
-            cuCtxDestroy_v2(bridge.context);
-            return bridge;
-        }
+    if (cuModuleGetFunction(&bridge.kernel_func, bridge.module, "vlp_kernel_$_main") != CUDA_SUCCESS) {
+        _ = cuModuleUnload(bridge.module);
+        _ = cuCtxDestroy_v2(bridge.context);
+        return bridge;
     }
 
     // 7. Compute memory layout

@@ -4,6 +4,12 @@
 // Imports vlp_gpu_shared.zig for all constants and field offsets.
 // ============================================================
 
+const builtin = @import("builtin");
+// pub const std_options: @import("std").Options = .{
+//     .side_channels_buffer_size = 0,
+// };
+pub const os = struct {};
+
 const shared = @import("vlp_gpu_shared");
 
 // ============================================================
